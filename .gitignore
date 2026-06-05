@@ -1,0 +1,7 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+data/raw/
+service-account-key.json
+cloud_function/env.yaml

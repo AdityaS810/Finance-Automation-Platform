@@ -1,0 +1,5 @@
+transaction_date,value_date,narration,debit_amount,credit_amount,balance_amount,reference_number
+2026-06-01,2026-06-01,Opening Balance,0,0,50000,OPENING
+2026-06-02,2026-06-02,Client Payment Received,0,25000,75000,TXN001
+2026-06-03,2026-06-03,Office Rent Paid,15000,0,60000,TXN002
+2026-06-04,2026-06-04,Software Subscription,3000,0,57000,TXN003
