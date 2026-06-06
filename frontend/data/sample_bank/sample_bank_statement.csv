@@ -1,0 +1,5 @@
+Transaction Date,Description,Withdrawal,Deposit,Closing Balance
+2026-05-01,Opening Balance,0,150000,150000
+2026-05-02,Client Receipt - Alpha Co,0,125000,275000
+2026-05-04,Vendor Payment - Beta Services,48250,0,226750
+2026-05-07,Office Rent,35000,0,191750

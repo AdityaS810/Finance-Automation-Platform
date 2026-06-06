@@ -5,3 +5,8 @@ __pycache__/
 data/raw/
 service-account-key.json
 cloud_function/env.yaml
+frontend/.env
+frontend/.pytest_cache/
+frontend/**/__pycache__/
+frontend/outputs/
+frontend/tests/_tmp/

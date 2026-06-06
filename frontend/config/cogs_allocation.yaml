@@ -1,0 +1,5 @@
+allocation_rules:
+  default_method: placeholder
+  notes:
+    - Update COGS mapping after finance category review.
+    - Replace placeholders with final expense heads in Week 2.

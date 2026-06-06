@@ -1,0 +1,22 @@
+{
+  "invoices": [
+    {
+      "gst_number": "29ABCDE1234F1Z7",
+      "invoice_no": "INV-1001",
+      "taxable_amount": 50000,
+      "integrated_tax": 9000,
+      "central_tax": 0,
+      "state_tax": 0,
+      "return_period": "2026-05"
+    },
+    {
+      "gst_number": "27PQRSX5678L1Z2",
+      "invoice_no": "INV-1002",
+      "taxable_amount": 74250,
+      "integrated_tax": 0,
+      "central_tax": 6682.5,
+      "state_tax": 6682.5,
+      "return_period": "2026-05"
+    }
+  ]
+}
