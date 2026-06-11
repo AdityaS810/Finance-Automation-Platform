@@ -20,7 +20,7 @@ page_header(
     "Upload and process bank statements and GSTR reports.",
 )
 
-bank_required_columns = ["date", "narration", "debit", "credit", "balance_amount"]
+bank_required_columns = ["date", "narration", "debit", "credit", "balance"]
 gstr_required_columns = ["gstin", "invoice_number", "taxable_value", "igst", "cgst", "sgst", "period"]
 
 
@@ -33,25 +33,6 @@ def render_validation_state(is_valid: bool, missing_columns: list[str]) -> None:
         st.caption("Missing columns: " + ", ".join(missing_columns))
 
 
-def remove_duplicate_columns(df):
-    """Remove duplicate columns so Streamlit can safely preview the dataframe."""
-    return df.loc[:, ~df.columns.duplicated()].copy()
-
-
-def prepare_bank_df_for_save(bank_df):
-    """
-    The frontend/parser uses balance_amount.
-    The backend save function currently expects balance.
-    This function adds balance for backend compatibility.
-    """
-    bank_df_to_save = bank_df.copy()
-
-    if "balance" not in bank_df_to_save.columns and "balance_amount" in bank_df_to_save.columns:
-        bank_df_to_save["balance"] = bank_df_to_save["balance_amount"]
-
-    return bank_df_to_save
-
-
 bank_tab, gstr_tab = st.tabs(["Bank Statement", "GSTR Report"])
 
 with bank_tab:
@@ -59,7 +40,6 @@ with bank_tab:
         "Upload Bank Statement",
         body_html="<p>Accepted formats: CSV, PDF</p>",
     )
-
     uploaded_bank_file = st.file_uploader(
         "Upload and Process",
         type=["csv", "pdf"],
@@ -70,15 +50,11 @@ with bank_tab:
     if uploaded_bank_file is not None:
         if uploaded_bank_file.name.lower().endswith(".csv"):
             bank_df = parse_bank_csv(uploaded_bank_file)
-            bank_df = remove_duplicate_columns(bank_df)
             validation_result = validate_required_columns(bank_df, bank_required_columns)
-
         elif uploaded_bank_file.name.lower().endswith(".pdf"):
             bank_df = parse_bank_pdf(uploaded_bank_file)
-            bank_df = remove_duplicate_columns(bank_df)
             validation_result = validate_required_columns(bank_df, bank_required_columns)
             st.info("PDF extraction is still using a placeholder parser. The expected output structure is shown below.")
-
         else:
             bank_df = None
             validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
@@ -87,12 +63,10 @@ with bank_tab:
         if bank_df is not None:
             file_summary_card(uploaded_bank_file.name, "Bank Statement", row_count=len(bank_df.index))
             render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
-
             section_card(
                 "Parsed Preview",
                 body_html="<p>Preview the standardized statement structure before saving.</p>",
             )
-
             st.dataframe(bank_df.head(20), use_container_width=True, hide_index=True)
 
             if st.button("Save Bank Data", key="save_bank_data", use_container_width=True):
@@ -100,8 +74,7 @@ with bank_tab:
                     st.error("Bank file cannot be saved yet because required columns are missing.")
                 else:
                     try:
-                        bank_df_to_save = prepare_bank_df_for_save(bank_df)
-                        result = save_bank_statement_upload(bank_df_to_save, uploaded_bank_file.name)
+                        result = save_bank_statement_upload(bank_df, uploaded_bank_file.name)
                         st.session_state["bank_upload_result"] = result
                         st.success(result["message"])
                     except Exception as error:
@@ -112,7 +85,6 @@ with bank_tab:
                 st.caption(
                     f"Latest bank upload ID: {bank_upload_result['upload_id']} | Rows saved: {bank_upload_result['records_parsed']}"
                 )
-
     else:
         section_card(
             "Bank Statement Status",
@@ -124,7 +96,6 @@ with gstr_tab:
         "Upload GSTR Report",
         body_html="<p>Accepted formats: Excel, JSON</p>",
     )
-
     uploaded_gstr_file = st.file_uploader(
         "Upload and Process",
         type=["xlsx", "xls", "json"],
@@ -135,27 +106,20 @@ with gstr_tab:
     if uploaded_gstr_file is not None:
         if uploaded_gstr_file.name.lower().endswith(".json"):
             gstr_df = parse_gstr_json(uploaded_gstr_file)
-            gstr_df = remove_duplicate_columns(gstr_df)
-
         elif uploaded_gstr_file.name.lower().endswith((".xlsx", ".xls")):
             gstr_df = parse_gstr_excel(uploaded_gstr_file)
-            gstr_df = remove_duplicate_columns(gstr_df)
-
         else:
             gstr_df = None
             st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
 
         if gstr_df is not None:
             validation_result = validate_required_columns(gstr_df, gstr_required_columns)
-
             file_summary_card(uploaded_gstr_file.name, "GSTR Report", row_count=len(gstr_df.index))
             render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
-
             section_card(
                 "Parsed Preview",
                 body_html="<p>Preview the standardized GSTR structure before saving.</p>",
             )
-
             st.dataframe(gstr_df.head(20), use_container_width=True, hide_index=True)
 
             if st.button("Save GSTR Data", key="save_gstr_data", use_container_width=True):
@@ -174,7 +138,6 @@ with gstr_tab:
                 st.caption(
                     f"Latest GSTR upload ID: {gstr_upload_result['upload_id']} | Rows saved: {gstr_upload_result['records_parsed']}"
                 )
-
     else:
         section_card(
             "GSTR Report Status",

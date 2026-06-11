@@ -1,0 +1,13 @@
+app:
+  name: Finance Automation Platform
+  owner: CEO Office
+  environment: local
+
+paths:
+  reports_output: outputs/reports
+  reconciliation_output: outputs/reconciliation_exports
+
+integrations:
+  zoho_books_enabled: false
+  bigquery_enabled: false
+  gemini_enabled: false

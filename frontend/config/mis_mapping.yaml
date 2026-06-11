@@ -1,0 +1,9 @@
+mis_report:
+  revenue:
+    - sales_invoices
+  cost_of_goods_sold:
+    - purchase_invoices
+  people_cost:
+    - payroll_placeholder
+  operating_expenses:
+    - opex_placeholder
