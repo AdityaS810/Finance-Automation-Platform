@@ -8,7 +8,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-from src.ui import insight_row, load_css, metric_card, page_header, section_card
+from src.ui import insight_row, load_css, page_header, render_status_card_grid, section_card
 from src.utils.file_helpers import list_output_files
 
 
@@ -25,58 +25,74 @@ gstr_upload_result = st.session_state.get("gstr_upload_result")
 mis_result = st.session_state.get("mis_report_result")
 bank_recon_result = st.session_state.get("bank_recon_result")
 gst_recon_result = st.session_state.get("gst_recon_result")
+sync_error = st.session_state.get("data_sync_error")
 
-metric_items = [
+dashboard_cards = [
     (
         "Last Data Sync",
-        sync_result["completed_at"].strftime("%d %b %Y") if sync_result else "Not Run Yet",
-        sync_result["duration"] if sync_result else "Use Data Sync page",
-        "Success" if sync_result else "Info",
-        "DS",
+        "Completed" if sync_result else "Failed" if sync_error else "Not Run Yet",
+        (
+            f"Completed {sync_result['completed_at']:%d %b %Y, %I:%M %p}"
+            if sync_result
+            else "Review the Data Sync page for the latest error"
+            if sync_error
+            else "Use Data Sync page"
+        ),
+        "success" if sync_result else "error" if sync_error else "neutral",
     ),
     (
         "Bank Statement Upload",
-        str(bank_upload_result["records_parsed"]) if bank_upload_result else "No Upload",
-        "Rows saved" if bank_upload_result else "Use Uploads page",
-        "Success" if bank_upload_result else "Info",
-        "BS",
+        "Completed" if bank_upload_result else "No Upload",
+        (
+            f"Rows saved: {bank_upload_result['records_parsed']}"
+            if bank_upload_result
+            else "Use Uploads page"
+        ),
+        "success" if bank_upload_result else "neutral",
     ),
     (
         "GSTR Upload",
-        str(gstr_upload_result["records_parsed"]) if gstr_upload_result else "No Upload",
-        "Rows saved" if gstr_upload_result else "Use Uploads page",
-        "Success" if gstr_upload_result else "Info",
-        "GR",
+        "Completed" if gstr_upload_result else "No Upload",
+        (
+            f"Rows saved: {gstr_upload_result['records_parsed']}"
+            if gstr_upload_result
+            else "Use Uploads page"
+        ),
+        "success" if gstr_upload_result else "neutral",
     ),
     (
         "MIS Report",
-        mis_result["metrics"]["Financial Year"] if mis_result else "Not Generated",
-        "Latest output ready" if mis_result and mis_result.get("report_path") else "Use MIS Report page",
-        "Success" if mis_result and mis_result.get("report_path") else "Info",
-        "MR",
+        "Completed" if mis_result and mis_result.get("report_path") else "Not Generated",
+        (
+            "Latest output ready"
+            if mis_result and mis_result.get("report_path")
+            else "Use MIS Report page"
+        ),
+        "success" if mis_result and mis_result.get("report_path") else "neutral",
     ),
     (
         "Bank Reconciliation",
-        str(bank_recon_result["summary"]["matched_records"]) if bank_recon_result else "Not Run Yet",
-        "Matched records" if bank_recon_result else "Use Reconciliation page",
-        "Success" if bank_recon_result else "Info",
-        "BR",
+        "Completed" if bank_recon_result else "Not Run Yet",
+        (
+            f"Matched records: {bank_recon_result['summary']['matched_records']}"
+            if bank_recon_result
+            else "Use Reconciliation page"
+        ),
+        "success" if bank_recon_result else "neutral",
     ),
     (
         "GST Reconciliation",
-        str(gst_recon_result["summary"]["exact_matches"]) if gst_recon_result else "Not Run Yet",
-        "Exact matches" if gst_recon_result else "Use Reconciliation page",
-        "Success" if gst_recon_result else "Info",
-        "GS",
+        "Completed" if gst_recon_result else "Not Run Yet",
+        (
+            f"Exact matches: {gst_recon_result['summary']['exact_matches']}"
+            if gst_recon_result
+            else "Use Reconciliation page"
+        ),
+        "success" if gst_recon_result else "neutral",
     ),
 ]
 
-metric_columns = st.columns(6)
-for column, (title, value, caption, status, icon) in zip(metric_columns, metric_items):
-    with column:
-        metric_card(title, value, caption=caption, status=status, icon=icon)
-
-st.markdown("<div style='height: 0.35rem;'></div>", unsafe_allow_html=True)
+render_status_card_grid(dashboard_cards)
 
 project_root = Path(__file__).resolve().parents[1]
 output_files = list_output_files(project_root / "outputs" / "reports") + list_output_files(project_root / "outputs" / "reconciliation_exports")

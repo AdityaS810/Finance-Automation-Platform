@@ -29,3 +29,15 @@ def test_validate_required_bank_columns_returns_valid():
     result = validate_required_columns(df, ["date", "narration", "debit", "credit", "balance"])
 
     assert result["is_valid"] is True
+
+
+def test_parse_bank_csv_coalesces_duplicate_date_columns():
+    csv_content = StringIO(
+        "Transaction Date,Value Date,Description,Withdrawal,Deposit,Closing Balance,Reference Number\n"
+        "2026-05-01,2026-05-02,Opening balance,0,1000,1000,REF-001\n"
+    )
+
+    df = parse_bank_csv(csv_content)
+
+    assert list(df.columns).count("date") == 1
+    assert df.loc[0, "date"] == "2026-05-01"

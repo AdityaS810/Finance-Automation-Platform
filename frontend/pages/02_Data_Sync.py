@@ -27,13 +27,12 @@ section_card(
     body_html="<p>Select the accounting period to bring into the reporting warehouse.</p>",
 )
 
-date_columns = st.columns([1, 1, 1.1])
+date_columns = st.columns([1, 1, 1.1], vertical_alignment="bottom")
 with date_columns[0]:
     start_date = st.date_input("From Date", value=default_start_date)
 with date_columns[1]:
     end_date = st.date_input("To Date", value=default_end_date)
 with date_columns[2]:
-    st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
     sync_clicked = st.button("Sync Latest Data", type="primary", use_container_width=True)
 
 if sync_clicked:

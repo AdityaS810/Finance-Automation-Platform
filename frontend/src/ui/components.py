@@ -8,6 +8,8 @@ import streamlit as st
 
 
 STATUS_CLASS_MAP = {
+    "accent": "info",
+    "neutral": "info",
     "success": "success",
     "completed": "success",
     "ready": "success",
@@ -52,20 +54,44 @@ def page_header(title: str, subtitle: str) -> None:
 def metric_card(title: str, value: str, caption: str | None = None, status: str | None = None, icon: str | None = None) -> None:
     """Render a metric card."""
     caption_html = f'<div class="fa-metric-caption">{html.escape(caption)}</div>' if caption else ""
-    status_html = status_badge(status) if status else ""
-    icon_label = html.escape(icon or title[:1].upper())
+    tone_class = STATUS_CLASS_MAP.get((status or "").strip().lower(), "neutral")
     st.markdown(
         f"""
         <div class="fa-metric-card">
-            <div class="fa-metric-top">
-                <div class="fa-metric-label">{html.escape(title)}</div>
-                <div class="fa-metric-icon">{icon_label}</div>
-            </div>
-            <div class="fa-metric-value">{html.escape(value)}</div>
+            <div class="fa-metric-label">{html.escape(title)}</div>
+            <div class="fa-metric-value fa-metric-value--{tone_class}">{html.escape(value)}</div>
             {caption_html}
-            {status_html}
         </div>
         """,
+        unsafe_allow_html=True,
+    )
+
+
+def status_card(title: str, status: str, helper: str, status_type: str = "neutral") -> str:
+    """Return dashboard status card HTML."""
+    status_class = {
+        "success": "status-success",
+        "error": "status-error",
+        "accent": "status-accent",
+        "neutral": "status-neutral",
+    }.get(status_type.strip().lower(), "status-neutral")
+
+    return (
+        f'<div class="fa-dashboard-card">'
+        f'<div class="fa-dashboard-card-body">'
+        f'<div class="fa-dashboard-card-title">{html.escape(title)}</div>'
+        f'<div class="fa-dashboard-card-status {status_class}">{html.escape(status)}</div>'
+        f"</div>"
+        f'<div class="fa-dashboard-card-helper">{html.escape(helper)}</div>'
+        f"</div>"
+    )
+
+
+def render_status_card_grid(cards: list[tuple[str, str, str, str]]) -> None:
+    """Render a responsive grid of dashboard status cards."""
+    cards_html = "".join(status_card(*card) for card in cards)
+    st.markdown(
+        f'<div class="fa-dashboard-grid">{cards_html}</div>',
         unsafe_allow_html=True,
     )
 
