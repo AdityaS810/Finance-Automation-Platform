@@ -6,6 +6,7 @@ from src.ui.components import (
     insight_row,
     metric_card,
     page_header,
+    render_status_card_grid,
     section_card,
     status_badge,
 )
@@ -15,6 +16,7 @@ __all__ = [
     "load_css",
     "page_header",
     "metric_card",
+    "render_status_card_grid",
     "status_badge",
     "section_card",
     "empty_state",

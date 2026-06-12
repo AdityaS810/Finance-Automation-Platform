@@ -23,6 +23,20 @@ def normalize_dataframe_columns(df: pd.DataFrame) -> pd.DataFrame:
     return normalized_df
 
 
+def coalesce_duplicate_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Merge duplicate column names by keeping the first non-null value across duplicates."""
+    deduplicated_df = pd.DataFrame(index=df.index)
+
+    for column_name in dict.fromkeys(df.columns):
+        column_group = df.loc[:, df.columns == column_name]
+        if isinstance(column_group, pd.Series):
+            deduplicated_df[column_name] = column_group
+        else:
+            deduplicated_df[column_name] = column_group.bfill(axis=1).iloc[:, 0]
+
+    return deduplicated_df
+
+
 def validate_required_columns(df: pd.DataFrame, required_columns: Iterable[str]) -> dict:
     """Check whether a dataframe contains a set of required columns."""
     required = [normalize_column_name(column) for column in required_columns]

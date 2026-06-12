@@ -10,3 +10,4 @@ frontend/.pytest_cache/
 frontend/**/__pycache__/
 frontend/outputs/
 frontend/tests/_tmp/
+

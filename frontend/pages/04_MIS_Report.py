@@ -20,11 +20,10 @@ page_header(
 
 financial_year_options = ["FY24-25", "FY25-26", "FY26-27"]
 
-selector_columns = st.columns([1, 1.2])
+selector_columns = st.columns([1, 1.2], vertical_alignment="bottom")
 with selector_columns[0]:
     selected_financial_year = st.selectbox("Financial Year", options=financial_year_options, index=1)
 with selector_columns[1]:
-    st.markdown("<div style='height: 1.9rem;'></div>", unsafe_allow_html=True)
     generate_clicked = st.button("Generate MIS Report", type="primary", use_container_width=True)
 
 if generate_clicked:
