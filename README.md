@@ -125,3 +125,18 @@ Activate virtual environment:
 
 ```powershell
 .\.venv\Scripts\activate
+```
+
+## Data Warehouse Layers
+
+Bronze = raw append-only source data. Zoho Books records land in `finance_bronze.zoho_raw` with the full `raw_json` payload, run metadata, and load timestamps.
+
+Silver = cleaned latest structured records. Views in `finance_silver` read from bronze, filter by `entity_name`, extract typed fields, and keep the latest record per `source_record_id`.
+
+Gold = reporting and reconciliation-ready business views. Views in `finance_gold` build on silver for dashboard totals, monthly MIS profit/loss inputs, bank reconciliation inputs, and GST reconciliation inputs.
+
+Create or refresh the current Silver and Gold views with:
+
+```powershell
+bq query --project_id=internal-project-work-497507 --use_legacy_sql=false < .\sql\ddl\create_silver_gold_views.sql
+```
