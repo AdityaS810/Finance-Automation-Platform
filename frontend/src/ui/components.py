@@ -8,33 +8,46 @@ import streamlit as st
 
 
 STATUS_CLASS_MAP = {
-    "accent": "info",
-    "neutral": "info",
+    "accent": "in_progress",
+    "neutral": "neutral",
+    "not started": "neutral",
+    "not run yet": "neutral",
+    "not generated": "neutral",
+    "no upload": "neutral",
+    "pending": "neutral",
     "success": "success",
     "completed": "success",
     "ready": "success",
     "ready to save": "success",
+    "synced": "success",
+    "uploaded": "success",
+    "generated": "success",
     "matched": "success",
     "exact match": "success",
-    "warning": "warning",
-    "missing columns": "warning",
-    "mismatch": "warning",
-    "fuzzy match": "warning",
-    "under review": "info",
-    "in progress": "info",
-    "info": "info",
-    "backend integration pending": "info",
+    "positive variance": "success",
+    "warning": "in_progress",
+    "under review": "in_progress",
+    "in progress": "in_progress",
+    "active": "in_progress",
+    "info": "in_progress",
+    "backend integration pending": "in_progress",
+    "processing": "in_progress",
+    "missing columns": "error",
+    "mismatch": "error",
+    "fuzzy match": "error",
     "unsupported file": "error",
     "error": "error",
+    "failed": "error",
     "unmatched": "error",
     "high risk": "error",
+    "negative variance": "error",
 }
 
 
 def status_badge(status: str) -> str:
     """Return an HTML badge for a status label."""
     safe_status = html.escape(status)
-    badge_class = STATUS_CLASS_MAP.get(status.strip().lower(), "info")
+    badge_class = STATUS_CLASS_MAP.get(status.strip().lower(), "neutral")
     return f'<span class="fa-badge {badge_class}">{safe_status}</span>'
 
 
