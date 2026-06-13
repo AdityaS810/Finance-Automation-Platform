@@ -135,6 +135,8 @@ Silver = cleaned latest structured records. Views in `finance_silver` read from 
 
 Gold = reporting and reconciliation-ready business views. Views in `finance_gold` build on silver for dashboard totals, monthly MIS profit/loss inputs, bank reconciliation inputs, and GST reconciliation inputs.
 
+MIS report generation now uses real Gold layer BigQuery data from `finance_gold.mis_monthly_pl` and `finance_gold.dashboard_summary`. The Streamlit MIS page writes the workbook to `frontend/outputs/MIS_PL_FY2526_generated.xlsx` with Summary, Monthly P&L, and Dashboard KPIs sheets.
+
 Create or refresh the current Silver and Gold views with:
 
 ```powershell

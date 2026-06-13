@@ -13,6 +13,7 @@ def ensure_directories() -> None:
     required_directories = [
         PROJECT_ROOT / "data" / "sample_bank",
         PROJECT_ROOT / "data" / "sample_gstr",
+        PROJECT_ROOT / "outputs",
         PROJECT_ROOT / "outputs" / "reports",
         PROJECT_ROOT / "outputs" / "reconciliation_exports",
     ]
