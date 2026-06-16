@@ -95,7 +95,11 @@ dashboard_cards = [
 render_status_card_grid(dashboard_cards)
 
 project_root = Path(__file__).resolve().parents[1]
-output_files = list_output_files(project_root / "outputs" / "reports") + list_output_files(project_root / "outputs" / "reconciliation_exports")
+output_files = (
+    list_output_files(project_root / "outputs")
+    + list_output_files(project_root / "outputs" / "reports")
+    + list_output_files(project_root / "outputs" / "reconciliation_exports")
+)
 
 activity_rows = []
 

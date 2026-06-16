@@ -20,7 +20,7 @@ page_header(
 )
 
 project_root = Path(__file__).resolve().parents[1]
-report_files = list_output_files(project_root / "outputs" / "reports")
+report_files = list_output_files(project_root / "outputs") + list_output_files(project_root / "outputs" / "reports")
 reconciliation_files = list_output_files(project_root / "outputs" / "reconciliation_exports")
 all_files = report_files + reconciliation_files
 
