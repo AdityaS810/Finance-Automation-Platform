@@ -239,6 +239,320 @@ QUALIFY ROW_NUMBER() OVER (
 
 
 -- ============================================================
+-- Silver History Views
+-- These views keep every cleaned version from bronze and mark the current
+-- version with is_current. Gold views continue to use latest Silver views.
+-- ============================================================
+
+CREATE OR REPLACE VIEW `finance_silver.dim_contacts_history` AS
+WITH versioned AS (
+  SELECT
+    run_id,
+    source_record_id,
+    source_record_id AS contact_id,
+    JSON_VALUE(raw_json, '$.contact_name') AS contact_name,
+    JSON_VALUE(raw_json, '$.company_name') AS company_name,
+    JSON_VALUE(raw_json, '$.contact_type') AS contact_type,
+    JSON_VALUE(raw_json, '$.email') AS email,
+    JSON_VALUE(raw_json, '$.phone') AS phone,
+    JSON_VALUE(raw_json, '$.mobile') AS mobile,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    JSON_VALUE(raw_json, '$.gst_no') AS gstin,
+    JSON_VALUE(raw_json, '$.gst_treatment') AS gst_treatment,
+    JSON_VALUE(raw_json, '$.place_of_contact') AS place_of_contact,
+    JSON_VALUE(raw_json, '$.currency_code') AS currency_code,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.outstanding_receivable_amount') AS NUMERIC) AS outstanding_receivable_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.outstanding_payable_amount') AS NUMERIC) AS outstanding_payable_amount,
+    loaded_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_record_id
+      ORDER BY loaded_at DESC
+    ) AS version_number
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'contacts'
+)
+SELECT
+  run_id,
+  source_record_id,
+  contact_id,
+  contact_name,
+  company_name,
+  contact_type,
+  email,
+  phone,
+  mobile,
+  status,
+  gstin,
+  gst_treatment,
+  place_of_contact,
+  currency_code,
+  outstanding_receivable_amount,
+  outstanding_payable_amount,
+  loaded_at,
+  version_number,
+  version_number = 1 AS is_current
+FROM versioned;
+
+
+CREATE OR REPLACE VIEW `finance_silver.dim_accounts_history` AS
+WITH versioned AS (
+  SELECT
+    run_id,
+    source_record_id,
+    source_record_id AS account_id,
+    JSON_VALUE(raw_json, '$.account_name') AS account_name,
+    JSON_VALUE(raw_json, '$.account_code') AS account_code,
+    JSON_VALUE(raw_json, '$.account_type') AS account_type,
+    JSON_VALUE(raw_json, '$.account_type_formatted') AS account_type_label,
+    JSON_VALUE(raw_json, '$.description') AS description,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.is_active') AS BOOL) AS is_active,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    loaded_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_record_id
+      ORDER BY loaded_at DESC
+    ) AS version_number
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'accounts'
+)
+SELECT
+  run_id,
+  source_record_id,
+  account_id,
+  account_name,
+  account_code,
+  account_type,
+  account_type_label,
+  description,
+  is_active,
+  status,
+  loaded_at,
+  version_number,
+  version_number = 1 AS is_current
+FROM versioned;
+
+
+CREATE OR REPLACE VIEW `finance_silver.fact_invoices_history` AS
+WITH versioned AS (
+  SELECT
+    run_id,
+    source_record_id,
+    source_record_id AS invoice_id,
+    JSON_VALUE(raw_json, '$.invoice_number') AS invoice_number,
+    JSON_VALUE(raw_json, '$.customer_id') AS customer_id,
+    JSON_VALUE(raw_json, '$.customer_name') AS customer_name,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS invoice_date,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.due_date') AS DATE) AS due_date,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    JSON_VALUE(raw_json, '$.currency_code') AS currency_code,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.sub_total') AS NUMERIC) AS sub_total_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.taxable_amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sub_total') AS NUMERIC)
+    ) AS taxable_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.tax_total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.tax_amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total_tax') AS NUMERIC)
+    ) AS tax_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.igst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.igst_amount') AS NUMERIC)
+    ) AS igst_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.cgst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.cgst_amount') AS NUMERIC)
+    ) AS cgst_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sgst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sgst_amount') AS NUMERIC)
+    ) AS sgst_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC) AS total_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.balance') AS NUMERIC) AS balance_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.amount_paid') AS NUMERIC) AS amount_paid,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.gst_no'),
+      JSON_VALUE(raw_json, '$.gstin'),
+      JSON_VALUE(raw_json, '$.tax_identification_number')
+    ) AS gstin,
+    JSON_VALUE(raw_json, '$.gst_treatment') AS gst_treatment,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.place_of_supply'),
+      JSON_VALUE(raw_json, '$.place_of_supply_code')
+    ) AS place_of_supply,
+    loaded_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_record_id
+      ORDER BY loaded_at DESC
+    ) AS version_number
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'invoices'
+)
+SELECT
+  run_id,
+  source_record_id,
+  invoice_id,
+  invoice_number,
+  customer_id,
+  customer_name,
+  invoice_date,
+  due_date,
+  status,
+  currency_code,
+  exchange_rate,
+  sub_total_amount,
+  taxable_amount,
+  tax_amount,
+  igst_amount,
+  cgst_amount,
+  sgst_amount,
+  total_amount,
+  balance_amount,
+  amount_paid,
+  gstin,
+  gst_treatment,
+  place_of_supply,
+  loaded_at,
+  version_number,
+  version_number = 1 AS is_current
+FROM versioned;
+
+
+CREATE OR REPLACE VIEW `finance_silver.fact_bills_history` AS
+WITH versioned AS (
+  SELECT
+    run_id,
+    source_record_id,
+    source_record_id AS bill_id,
+    JSON_VALUE(raw_json, '$.bill_number') AS bill_number,
+    JSON_VALUE(raw_json, '$.vendor_id') AS vendor_id,
+    JSON_VALUE(raw_json, '$.vendor_name') AS vendor_name,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS bill_date,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.due_date') AS DATE) AS due_date,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    JSON_VALUE(raw_json, '$.currency_code') AS currency_code,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.sub_total') AS NUMERIC) AS sub_total_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.taxable_amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sub_total') AS NUMERIC)
+    ) AS taxable_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.tax_total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.tax_amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total_tax') AS NUMERIC)
+    ) AS tax_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.igst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.igst_amount') AS NUMERIC)
+    ) AS igst_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.cgst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.cgst_amount') AS NUMERIC)
+    ) AS cgst_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sgst') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.sgst_amount') AS NUMERIC)
+    ) AS sgst_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC) AS total_amount,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.balance') AS NUMERIC) AS balance_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.payment_made') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.amount_paid') AS NUMERIC)
+    ) AS amount_paid,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.gst_no'),
+      JSON_VALUE(raw_json, '$.gstin'),
+      JSON_VALUE(raw_json, '$.tax_identification_number')
+    ) AS gstin,
+    JSON_VALUE(raw_json, '$.gst_treatment') AS gst_treatment,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.place_of_supply'),
+      JSON_VALUE(raw_json, '$.place_of_supply_code')
+    ) AS place_of_supply,
+    loaded_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_record_id
+      ORDER BY loaded_at DESC
+    ) AS version_number
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'bills'
+)
+SELECT
+  run_id,
+  source_record_id,
+  bill_id,
+  bill_number,
+  vendor_id,
+  vendor_name,
+  bill_date,
+  due_date,
+  status,
+  currency_code,
+  exchange_rate,
+  sub_total_amount,
+  taxable_amount,
+  tax_amount,
+  igst_amount,
+  cgst_amount,
+  sgst_amount,
+  total_amount,
+  balance_amount,
+  amount_paid,
+  gstin,
+  gst_treatment,
+  place_of_supply,
+  loaded_at,
+  version_number,
+  version_number = 1 AS is_current
+FROM versioned;
+
+
+CREATE OR REPLACE VIEW `finance_silver.fact_journals_history` AS
+WITH versioned AS (
+  SELECT
+    run_id,
+    source_record_id,
+    source_record_id AS journal_id,
+    JSON_VALUE(raw_json, '$.journal_number') AS journal_number,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS journal_date,
+    JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    JSON_VALUE(raw_json, '$.notes') AS notes,
+    JSON_VALUE(raw_json, '$.currency_code') AS currency_code,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC)
+    ) AS total_amount,
+    loaded_at,
+    ROW_NUMBER() OVER (
+      PARTITION BY source_record_id
+      ORDER BY loaded_at DESC
+    ) AS version_number
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'journals'
+)
+SELECT
+  run_id,
+  source_record_id,
+  journal_id,
+  journal_number,
+  journal_date,
+  reference_number,
+  status,
+  notes,
+  currency_code,
+  exchange_rate,
+  total_amount,
+  loaded_at,
+  version_number,
+  version_number = 1 AS is_current
+FROM versioned;
+
+
+-- ============================================================
 -- Gold Layer
 -- Gold views build on silver views and are shaped for dashboards,
 -- MIS reporting, and reconciliation workflows.

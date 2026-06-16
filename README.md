@@ -129,11 +129,11 @@ Activate virtual environment:
 
 ## Data Warehouse Layers
 
-Bronze = raw append-only source data. Zoho Books records land in `finance_bronze.zoho_raw` with the full `raw_json` payload, run metadata, and load timestamps.
+Bronze = raw append-only source data. Zoho Books records land in `finance_bronze.zoho_raw` with the full `raw_json` payload, run metadata, and load timestamps. Bronze stores all raw versions from every sync run.
 
-Silver = cleaned latest structured records. Views in `finance_silver` read from bronze, filter by `entity_name`, extract typed fields, and keep the latest record per `source_record_id`.
+Silver = cleaned structured records. Latest views in `finance_silver` read from bronze, filter by `entity_name`, extract typed fields, and keep the current record per `source_record_id`. Silver history views keep every typed version with `version_number` and `is_current` for audit and change tracking.
 
-Gold = reporting and reconciliation-ready business views. Views in `finance_gold` build on silver for dashboard totals, monthly MIS profit/loss inputs, bank reconciliation inputs, and GST reconciliation inputs.
+Gold = reporting and reconciliation-ready business views. Views in `finance_gold` build on current Silver views for dashboard totals, monthly MIS profit/loss inputs, bank reconciliation inputs, and GST reconciliation inputs.
 
 MIS report generation now uses real Gold layer BigQuery data from `finance_gold.mis_monthly_pl` and `finance_gold.dashboard_summary`. The Streamlit MIS page writes the workbook to `frontend/outputs/MIS_PL_FY2526_generated.xlsx` with Summary, Monthly P&L, and Dashboard KPIs sheets.
 
