@@ -47,7 +47,7 @@ with bank_tab:
     with summary_columns[2]:
         metric_card("Unmatched", str(unmatched_count), caption="Require follow-up", status="Error", icon="UM")
     with summary_columns[3]:
-        metric_card("Under Review", str(under_review_count), caption="AI-assisted suggestions pending", status="Warning", icon="RV")
+        metric_card("Under Review", str(under_review_count), caption="AI-assisted suggestions pending", status="In Progress", icon="RV")
 
     section_card(
         "Reconciliation Review",
@@ -100,9 +100,9 @@ with gst_tab:
     with summary_columns[0]:
         metric_card("Exact Matches", str(summary["exact_matches"]), caption="Invoices aligned", status="Success", icon="EM")
     with summary_columns[1]:
-        metric_card("Mismatches", str(summary["mismatches"]), caption="Amount variance detected", status="Warning", icon="MM")
+        metric_card("Mismatches", str(summary["mismatches"]), caption="Amount variance detected", status="Error", icon="MM")
     with summary_columns[2]:
-        metric_card("Missing in GSTR", str(summary["missing_in_gstr"]), caption="Not found in return", status="Warning", icon="MG")
+        metric_card("Missing in GSTR", str(summary["missing_in_gstr"]), caption="Not found in return", status="Error", icon="MG")
     with summary_columns[3]:
         metric_card("High-risk ITC Issues", str(summary["high_risk_itc_issues"]), caption="Immediate review recommended", status="Error", icon="HR")
 

@@ -6,13 +6,17 @@
     --automation-green: #0FB594;
     --indigo: #254DB1;
     --alert-red: #D72422;
-    --charcoal-black: #000000;
     --cloud-gray: #F4F7FC;
     --ice-blue: #E7F3FF;
     --surface-white: #FFFFFF;
     --muted-teal: rgba(31, 62, 74, 0.72);
     --border-subtle: rgba(31, 62, 74, 0.10);
     --border-strong: rgba(31, 62, 74, 0.16);
+    --accent-blue-soft: rgba(0, 112, 192, 0.10);
+    --accent-cyan-soft: rgba(0, 174, 207, 0.12);
+    --success-soft: rgba(15, 181, 148, 0.12);
+    --error-soft: rgba(215, 36, 34, 0.10);
+    --neutral-soft: rgba(31, 62, 74, 0.08);
     --shadow-soft: 0 14px 35px rgba(31, 62, 74, 0.08);
     --shadow-subtle: 0 8px 24px rgba(31, 62, 74, 0.06);
     --radius-xl: 24px;
@@ -176,6 +180,7 @@ a {
 .fa-dashboard-card {
     background: var(--surface-white);
     border: 1px solid var(--border-subtle);
+    border-top: 4px solid var(--enterprise-blue);
     border-radius: var(--radius-lg);
     padding: 24px;
     min-height: 180px;
@@ -228,7 +233,7 @@ a {
 }
 
 .status-accent {
-    color: var(--enterprise-blue);
+    color: var(--data-cyan);
 }
 
 .status-neutral {
@@ -248,28 +253,39 @@ a {
 }
 
 .fa-badge.success {
-    background: rgba(15, 181, 148, 0.12);
+    background: var(--success-soft);
     color: var(--automation-green);
     border-color: rgba(15, 181, 148, 0.22);
 }
 
 .fa-badge.warning {
-    background: rgba(0, 176, 240, 0.10);
-    color: var(--enterprise-blue);
-    border-color: rgba(0, 112, 192, 0.16);
+    background: var(--accent-cyan-soft);
+    color: var(--data-cyan);
+    border-color: rgba(0, 174, 207, 0.18);
 }
 
 .fa-badge.error {
-    background: rgba(215, 36, 34, 0.10);
+    background: var(--error-soft);
     color: var(--alert-red);
     border-color: rgba(215, 36, 34, 0.20);
 }
 
-.fa-badge.info,
 .fa-badge.in_progress {
     background: var(--ice-blue);
     color: var(--enterprise-blue);
     border-color: rgba(0, 112, 192, 0.14);
+}
+
+.fa-badge.info {
+    background: var(--ice-blue);
+    color: var(--enterprise-blue);
+    border-color: rgba(0, 112, 192, 0.14);
+}
+
+.fa-badge.neutral {
+    background: var(--neutral-soft);
+    color: var(--graphite-teal);
+    border-color: rgba(31, 62, 74, 0.14);
 }
 
 .fa-empty-state {
@@ -361,7 +377,7 @@ a {
     white-space: pre-line;
     position: absolute;
     top: 1.2rem;
-    left: 1.2rem;
+    left: 0.6rem;
     color: #FFFFFF;
     font-size: 1.02rem;
     line-height: 1.35;
@@ -448,6 +464,18 @@ div[data-testid="stDateInput"] [data-baseweb="input"] > div {
     border-radius: 14px;
 }
 
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div {
+    background: var(--surface-white) !important;
+    border: 1.5px solid rgba(31, 62, 74, 0.82) !important;
+    border-radius: 14px !important;
+    min-height: 3rem;
+    display: flex;
+    align-items: center;
+    padding: 0 0.9rem !important;
+    box-shadow: none !important;
+    transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+
 div[data-testid="stDateInput"] label,
 div[data-testid="stSelectbox"] label,
 div[data-testid="stFileUploader"] label {
@@ -458,6 +486,8 @@ div[data-testid="stFileUploader"] label {
 
 div[data-testid="stFileUploader"] {
     padding: 0.45rem 0.7rem;
+    background: linear-gradient(180deg, var(--ice-blue) 0%, var(--surface-white) 100%);
+    border-color: rgba(0, 174, 207, 0.20);
 }
 
 div[data-testid="stAlert"] {
@@ -476,7 +506,7 @@ div[data-testid="stAlert"][kind="error"] {
 }
 
 div[data-testid="stAlert"][kind="warning"] {
-    background: rgba(0, 176, 240, 0.10);
+    background: var(--ice-blue);
     border-left-color: var(--data-cyan);
 }
 
@@ -490,6 +520,23 @@ div[data-testid="stSelectbox"] input {
     color: var(--graphite-teal);
     font-size: 1rem;
     font-weight: 600;
+}
+
+div[data-testid="stSelectbox"] [data-baseweb="select"] span,
+div[data-testid="stSelectbox"] [data-baseweb="select"] input,
+div[data-testid="stSelectbox"] [data-baseweb="select"] div {
+    color: var(--graphite-teal) !important;
+    -webkit-text-fill-color: var(--graphite-teal) !important;
+}
+
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div > div,
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div > div > div {
+    display: flex;
+    align-items: center;
+}
+
+div[data-testid="stSelectbox"] [data-baseweb="select"] span {
+    line-height: 1.2 !important;
 }
 
 div[data-testid="stDateInput"] input {
@@ -507,6 +554,16 @@ div[data-testid="stDateInput"] svg {
     fill: var(--enterprise-blue) !important;
 }
 
+div[data-testid="stSelectbox"] svg {
+    fill: var(--enterprise-blue) !important;
+}
+
+div[data-testid="stSelectbox"] [data-baseweb="select"]:hover > div,
+div[data-testid="stSelectbox"] [data-baseweb="select"] > div:focus-within {
+    border-color: var(--enterprise-blue) !important;
+    box-shadow: 0 0 0 4px rgba(0, 112, 192, 0.12) !important;
+}
+
 div[data-baseweb="select"] > div {
     border: none !important;
     min-height: 3rem;
@@ -521,6 +578,12 @@ div[data-baseweb="input"] > div {
     margin-bottom: 0.8rem;
 }
 
+[data-baseweb="tab-highlight"] {
+    background: var(--enterprise-blue) !important;
+    height: 3px !important;
+    border-radius: 999px !important;
+}
+
 [data-baseweb="tab"] {
     height: 44px;
     border-radius: 14px;
@@ -529,7 +592,7 @@ div[data-baseweb="input"] > div {
     padding: 0 1rem;
     font-weight: 700;
     border: 1px solid rgba(0, 112, 192, 0.08);
-    transition: background 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+    transition: background 140ms ease, color 140ms ease, border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
 }
 
 [aria-selected="true"][data-baseweb="tab"] {
@@ -547,8 +610,18 @@ div[data-baseweb="input"] > div {
 }
 
 [data-baseweb="tab"]:hover {
-    border-color: rgba(0, 112, 192, 0.18);
-    color: var(--graphite-teal);
+    background: var(--indigo);
+    border-color: var(--indigo);
+    color: #FFFFFF;
+    transform: translateY(-1px);
+    box-shadow: 0 14px 28px rgba(37, 77, 177, 0.22);
+}
+
+[data-baseweb="tab"]:hover *,
+[data-baseweb="tab"]:hover p,
+[data-baseweb="tab"]:hover span {
+    color: #FFFFFF !important;
+    fill: #FFFFFF !important;
 }
 
 @media (max-width: 1280px) {
