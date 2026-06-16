@@ -1,0 +1,86 @@
+mis_report:
+  revenue:
+    techm_billings:
+      source_types: ["invoice"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "reference_number"]
+      keywords: ["tech mahindra", "techm"]
+    bsm_revenue:
+      source_types: ["invoice"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "reference_number"]
+      keywords: ["bsm", "platform amc", "accrual generation", "feature enablement"]
+    fd_interest:
+      source_types: ["journal"]
+      match_fields: ["account_name", "description", "item_name", "notes"]
+      keywords: ["fixed deposit", "fd interest", "interest income", "bank interest"]
+  expense:
+    delivery_india:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["parashar", "sangeeth", "jitin", "dipti", "dhanashri", "pinkesh", "delivery payroll", "delivery salary"]
+    bsm_delivery_contractors:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["kashish", "priyanka", "nitin chandani", "bsm crew", "bsm contractor"]
+    external_delivery_vendors:
+      source_types: ["bill"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["conam", "biltzentech", "altysys", "external delivery"]
+    rd_salaries:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["salary", "payroll", "pareek", "yash", "megha", "rd salary", "r&d salary"]
+      exclude_keywords: ["parashar", "sangeeth", "jitin", "dipti", "dhanashri", "pinkesh"]
+    consultant_expense:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["consultant", "contractor", "stackpro", "project payment", "vendor retainer"]
+      exclude_keywords: ["ramki", "dorothea", "kashish", "priyanka", "nitin chandani", "conam", "biltzentech", "altysys"]
+    software_subscriptions:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["software", "subscription", "saas", "licence", "license", "notion", "google workspace", "chatgpt", "openai", "slack", "hubspot"]
+    advertising_marketing:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["advert", "marketing", "campaign", "promotion", "google ads", "meta ads", "linkedin ads"]
+    travel_expenses:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["travel", "flight", "hotel", "uber", "ola", "taxi", "rail", "trip"]
+    meals_entertainment:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["meal", "meals", "restaurant", "food", "entertainment", "dinner", "lunch"]
+    rent:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["rent", "innov8", "co-working", "coworking", "office lease"]
+    it_internet:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["internet", "broadband", "it expense", "hardware", "laptop", "router", "cloud hosting"]
+    legal:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["legal", "law", "contract review", "compliance filing"]
+    audit_non_operating:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["audit", "statutory", "filing fee", "non-operating", "non operating"]
+  note_tracking:
+    bonus:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["bonus", "performance bonus", "annual bonus"]
+    one_time:
+      source_types: ["bill", "journal"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["stackpro", "one-time project", "one time project", "project payment", "agentic ai"]
+    bsm_provision:
+      source_types: ["journal", "invoice", "bill"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes", "account_name"]
+      keywords: ["bsm provision", "commercial discussion", "provision"]
+    techm_receivable:
+      source_types: ["invoice"]
+      match_fields: ["counterparty_name", "description", "item_name", "notes"]
+      keywords: ["tech mahindra", "techm"]

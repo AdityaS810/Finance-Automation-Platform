@@ -28,7 +28,7 @@ with selector_columns[1]:
 
 if generate_clicked:
     try:
-        report_output_dir = Path(__file__).resolve().parents[1] / "outputs"
+        report_output_dir = Path(__file__).resolve().parents[2] / "outputs"
         result = generate_mis_report(selected_financial_year, report_output_dir)
         st.session_state["mis_report_result"] = result
         st.session_state.pop("mis_report_error", None)
@@ -60,7 +60,7 @@ report_card_columns = st.columns([1.2, 0.9])
 with report_card_columns[0]:
     section_card(
         "Latest Report",
-        body_html="<p>The MIS workbook is generated from BigQuery Gold layer views.</p>",
+        body_html="<p>The MIS workbook is generated in the company MIS format from BigQuery Gold and Zoho-backed data.</p>",
     )
     if mis_result and mis_result.get("report_path") and Path(mis_result["report_path"]).exists():
         report_path = mis_result["report_path"]
@@ -95,6 +95,6 @@ with report_card_columns[1]:
 if mis_result:
     section_card(
         "Monthly MIS Preview",
-        body_html="<p>Preview rows from <strong>finance_gold.mis_monthly_pl</strong>.</p>",
+        body_html="<p>Preview rows from <strong>finance_gold.mis_monthly_pl</strong> used to reconcile the formatted MIS workbook.</p>",
     )
     st.dataframe(mis_result["monthly_preview"], use_container_width=True, hide_index=True)
