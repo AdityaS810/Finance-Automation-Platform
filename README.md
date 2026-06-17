@@ -137,6 +137,14 @@ Gold = reporting and reconciliation-ready business views. Views in `finance_gold
 
 MIS report generation now uses real Gold layer BigQuery data from `finance_gold.mis_monthly_pl` and `finance_gold.dashboard_summary`. The Streamlit MIS page writes the workbook to `frontend/outputs/MIS_PL_FY2526_generated.xlsx` with Summary, Monthly P&L, and Dashboard KPIs sheets.
 
+## Reconciliation Logic
+
+Bank reconciliation now uses deterministic backend matching before any AI explanation layer. Uploaded bank lines from `finance_silver.fact_bank_statement_lines` are compared with accounting-side rows from `finance_gold.bank_reconciliation_input` using signed amount matching with a small tolerance, transaction dates within plus/minus 3 days, and narration/customer/vendor text similarity. Results are saved to `frontend/outputs/reconciliation_exports/bank_reconciliation_results.xlsx`.
+
+GST reconciliation compares uploaded GSTR lines from `finance_silver.fact_gstr_lines` with accounting-side GST records from `finance_gold.gst_reconciliation_input`. Matching uses GSTIN, invoice number, taxable value, and IGST/CGST/SGST/total tax checks. Results are saved to `frontend/outputs/reconciliation_exports/gst_reconciliation_results.xlsx`.
+
+Optional Vertex AI Gemini insights can explain reconciliation exceptions for human review. Enable them with Google Cloud Application Default Credentials plus `VERTEX_AI_PROJECT_ID` or `GCP_PROJECT_ID`; `VERTEX_AI_LOCATION` defaults to `asia-south1` and `VERTEX_AI_MODEL` defaults to `gemini-2.0-flash`. Gemini is limited to the first 20 uncertain rows, does not calculate finance values, and never changes rule-based match statuses or confidence scores. If Vertex AI is unavailable, the Streamlit page still shows the rule-based results and downloadable Excel files.
+
 Create or refresh the current Silver and Gold views with:
 
 ```powershell
