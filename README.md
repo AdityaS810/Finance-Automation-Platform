@@ -137,6 +137,23 @@ Gold = reporting and reconciliation-ready business views. Views in `finance_gold
 
 MIS report generation now uses real Gold layer BigQuery data from `finance_gold.mis_monthly_pl` and `finance_gold.dashboard_summary`. The Streamlit MIS page writes the workbook to `frontend/outputs/MIS_PL_FY2526_generated.xlsx` with Summary, Monthly P&L, and Dashboard KPIs sheets.
 
+## Multi-Organization Zoho Sync
+
+The Zoho sync supports two non-secret organization configs:
+
+- `us` = Midoffice Data International, Inc, org ID `916007477`, base currency USD
+- `india` = Midoffice Data Solutions Private Limited, org ID `880373191`, base currency INR
+
+Each sync fetches the same configured Zoho Books entities for both organizations and writes raw files under `raw/zoho_books/{org_key}/{entity}/...`. Bronze rows include `source_org_key`, `source_org_id`, `source_org_name`, `source_country`, and `source_currency` so Silver and Gold can preserve source lineage.
+
+Gold reporting is INR-based. The current demo FX view uses USD to INR = `83.00` and INR to INR = `1.00`; replace `finance_silver.fx_rates_demo` with managed FX rates before final statutory reporting. The MIS page can generate consolidated INR reporting for all organizations or filter to India/US.
+
+Apply the bronze metadata migration before the next multi-org sync:
+
+```powershell
+bq query --project_id=internal-project-work-497507 --use_legacy_sql=false < .\sql\ddl\alter_bronze_add_org_metadata.sql
+```
+
 ## Reconciliation Logic
 
 Bank reconciliation now uses deterministic backend matching before any AI explanation layer. Uploaded bank lines from `finance_silver.fact_bank_statement_lines` are compared with accounting-side rows from `finance_gold.bank_reconciliation_input` using signed amount matching with a small tolerance, transaction dates within plus/minus 3 days, and narration/customer/vendor text similarity. Results are saved to `frontend/outputs/reconciliation_exports/bank_reconciliation_results.xlsx`.

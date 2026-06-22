@@ -137,26 +137,23 @@ def reconcile_gst_data(gstr_lines_df: pd.DataFrame, books_gst_df: pd.DataFrame) 
     result_rows = []
 
     for _, gstr_row in gstr_df.iterrows():
-        candidate_indexes = books_df[
-            (books_df["gstin_key"] == gstr_row["gstin_key"])
-            & (books_df["invoice_key"] == gstr_row["invoice_key"])
-        ].index
+        candidate_indexes = [
+            books_index
+            for books_index in books_df[
+                (books_df["gstin_key"] == gstr_row["gstin_key"])
+                & (books_df["invoice_key"] == gstr_row["invoice_key"])
+            ].index
+            if books_index not in used_books_indexes
+        ]
 
         if len(candidate_indexes) == 0:
             result_rows.append(_gstr_result_row(gstr_row, pd.Series(dtype="object"), "missing_in_books", 0.0, "No accounting GST record matched GSTIN and invoice number."))
             continue
 
-        best_index = candidate_indexes[0]
+        best_index = _best_books_gst_candidate(gstr_row, books_df.loc[candidate_indexes])
         books_row = books_df.loc[best_index]
         used_books_indexes.add(best_index)
-        amount_checks = [
-            _amounts_match(gstr_row["gstr_taxable_value"], books_row["books_taxable_value"]),
-            _amounts_match(gstr_row["gstr_tax_amount"], books_row["books_tax_amount"]),
-            _amounts_match(gstr_row["gstr_igst_amount"], books_row["books_igst_amount"]),
-            _amounts_match(gstr_row["gstr_cgst_amount"], books_row["books_cgst_amount"]),
-            _amounts_match(gstr_row["gstr_sgst_amount"], books_row["books_sgst_amount"]),
-        ]
-        confidence = round(0.4 + (sum(amount_checks) / len(amount_checks)) * 0.6, 2)
+        confidence, amount_checks = _gst_candidate_score(gstr_row, books_row)
 
         if all(amount_checks):
             status = "matched"
@@ -175,7 +172,7 @@ def reconcile_gst_data(gstr_lines_df: pd.DataFrame, books_gst_df: pd.DataFrame) 
 
 
 def _prepare_gstr_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Normalise uploaded GSTR columns before matching."""
+    """Normalise and deduplicate uploaded GSTR columns before matching."""
     working_df = dataframe.copy().reset_index(drop=True)
     if "gstr_line_id" not in working_df.columns:
         upload = working_df.get("upload_id", pd.Series("upload", index=working_df.index)).fillna("upload").astype(str)
@@ -194,7 +191,7 @@ def _prepare_gstr_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     if "gstr_tax_amount" not in working_df.columns and "total_tax" not in working_df.columns:
         tax_amount = igst_amount + cgst_amount + sgst_amount
 
-    return pd.DataFrame(
+    prepared_df = pd.DataFrame(
         {
             "gstr_line_id": gstr_line_id,
             "gstin": gstin,
@@ -208,10 +205,11 @@ def _prepare_gstr_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "invoice_key": invoice_number.map(_normalise_key),
         }
     )
+    return _deduplicate_gst_records(prepared_df, "gstr_line_id")
 
 
 def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Normalise accounting-side GST columns before matching."""
+    """Normalise and deduplicate accounting-side GST columns before matching."""
     working_df = dataframe.copy().reset_index(drop=True)
     if working_df.empty:
         return pd.DataFrame(
@@ -240,7 +238,7 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     if "books_tax_amount" not in working_df.columns and "total_tax" not in working_df.columns:
         tax_amount = igst_amount + cgst_amount + sgst_amount
 
-    return pd.DataFrame(
+    prepared_df = pd.DataFrame(
         {
             "books_record_id": books_record_id,
             "gstin": gstin,
@@ -254,6 +252,68 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "invoice_key": invoice_number.map(_normalise_key),
         }
     )
+    return _deduplicate_gst_records(prepared_df, "books_record_id")
+
+
+def _deduplicate_gst_records(dataframe: pd.DataFrame, id_column: str) -> pd.DataFrame:
+    """Keep one row per GSTIN, invoice number, taxable value, and tax signature."""
+    if dataframe.empty:
+        return dataframe
+
+    working_df = dataframe.copy()
+    amount_columns = [
+        column_name
+        for column_name in [
+            "gstr_taxable_value",
+            "gstr_tax_amount",
+            "gstr_igst_amount",
+            "gstr_cgst_amount",
+            "gstr_sgst_amount",
+            "books_taxable_value",
+            "books_tax_amount",
+            "books_igst_amount",
+            "books_cgst_amount",
+            "books_sgst_amount",
+        ]
+        if column_name in working_df.columns
+    ]
+    amount_key_columns = {}
+    for column_name in amount_columns:
+        amount_key_columns[f"{column_name}_key"] = pd.to_numeric(working_df[column_name], errors="coerce").fillna(0).round(2)
+    if amount_key_columns:
+        working_df = working_df.assign(**amount_key_columns)
+
+    dedupe_columns = ["gstin_key", "invoice_key"] + [f"{column_name}_key" for column_name in amount_columns]
+    if id_column in working_df.columns:
+        working_df = working_df.drop_duplicates(subset=[id_column], keep="first")
+    working_df = working_df.drop_duplicates(subset=dedupe_columns, keep="first")
+    key_columns = [column_name for column_name in working_df.columns if column_name.endswith("_key") and column_name not in {"gstin_key", "invoice_key"}]
+    return working_df.drop(columns=key_columns).reset_index(drop=True)
+
+
+def _best_books_gst_candidate(gstr_row: pd.Series, candidate_df: pd.DataFrame) -> int:
+    """Choose the highest confidence books-side GST candidate for one GSTR row."""
+    best_index = candidate_df.index[0]
+    best_score = -1.0
+    for books_index, books_row in candidate_df.iterrows():
+        confidence, _ = _gst_candidate_score(gstr_row, books_row)
+        if confidence > best_score:
+            best_score = confidence
+            best_index = books_index
+    return best_index
+
+
+def _gst_candidate_score(gstr_row: pd.Series, books_row: pd.Series) -> tuple[float, list[bool]]:
+    """Score GST invoice candidates using taxable and tax amount checks."""
+    amount_checks = [
+        _amounts_match(gstr_row["gstr_taxable_value"], books_row["books_taxable_value"]),
+        _amounts_match(gstr_row["gstr_tax_amount"], books_row["books_tax_amount"]),
+        _amounts_match(gstr_row["gstr_igst_amount"], books_row["books_igst_amount"]),
+        _amounts_match(gstr_row["gstr_cgst_amount"], books_row["books_cgst_amount"]),
+        _amounts_match(gstr_row["gstr_sgst_amount"], books_row["books_sgst_amount"]),
+    ]
+    confidence = round(0.4 + (sum(amount_checks) / len(amount_checks)) * 0.6, 2)
+    return confidence, amount_checks
 
 
 def _gstr_result_row(gstr_row: pd.Series, books_row: pd.Series, status: str, confidence: float, reason: str) -> dict:

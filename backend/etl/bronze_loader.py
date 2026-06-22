@@ -19,6 +19,11 @@ def load_raw_records_to_bigquery(
     entity_name: str,
     id_field: str,
     gcs_uri: str | None = None,
+    source_org_key: str | None = None,
+    source_org_id: str | None = None,
+    source_org_name: str | None = None,
+    source_country: str | None = None,
+    source_currency: str | None = None,
 ) -> int:
     """Load raw API records into a generic BigQuery bronze table.
 
@@ -41,6 +46,11 @@ def load_raw_records_to_bigquery(
             "source_system": source_system,
             "entity_name": entity_name,
             "source_record_id": str(record.get(id_field, "")),
+            "source_org_key": source_org_key,
+            "source_org_id": source_org_id,
+            "source_org_name": source_org_name,
+            "source_country": source_country,
+            "source_currency": source_currency,
             "raw_json": json.dumps(record, default=str),
             "loaded_at": loaded_at,
         }

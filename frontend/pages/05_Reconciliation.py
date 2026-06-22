@@ -20,6 +20,14 @@ page_header(
 
 bank_tab, gst_tab = st.tabs(["Bank Reconciliation", "GST Reconciliation"])
 output_dir = Path(__file__).resolve().parents[1] / "outputs" / "reconciliation_exports"
+AI_PREVIEW_COLUMNS = [
+    "match_status",
+    "confidence_score",
+    "match_reason",
+    "ai_summary",
+    "ai_recommendation",
+    "ai_risk_level",
+]
 
 
 def _download_excel_button(label: str, export_path: Path) -> None:
@@ -50,6 +58,21 @@ def _show_ai_status(result: dict) -> None:
         st.warning(ai_message)
 
 
+def _ai_preview_dataframe(results_df):
+    """Return a compact preview focused on rule and AI review signals."""
+    available_columns = [column for column in AI_PREVIEW_COLUMNS if column in results_df.columns]
+    return results_df.loc[:, available_columns]
+
+
+def _split_ignored_opening_balances(results_df):
+    """Keep opening balances separate from real bank transaction matching."""
+    if "match_status" not in results_df.columns:
+        return results_df, results_df.iloc[0:0]
+
+    ignored_mask = results_df["match_status"] == "ignored_opening_balance"
+    return results_df[~ignored_mask], results_df[ignored_mask]
+
+
 with bank_tab:
     section_card(
         "Bank Matching",
@@ -70,23 +93,44 @@ with bank_tab:
 
     if bank_result:
         bank_summary = bank_result["summary"]
-        summary_columns = st.columns(4)
+        summary_columns = st.columns(5)
         with summary_columns[0]:
-            metric_card("Total Records", str(bank_summary["total_records"]), caption="Bank lines processed", status="Info", icon="TR")
+            metric_card("Transactions", str(bank_summary["transaction_records"]), caption="Bank lines matched", status="Info", icon="TR")
         with summary_columns[1]:
             metric_card("Matched", str(bank_summary["matched"]), caption="High-confidence matches", status="Success", icon="MT")
         with summary_columns[2]:
             metric_card("Possible Match", str(bank_summary["possible_match"]), caption="Needs review", status="Warning", icon="PM")
         with summary_columns[3]:
             metric_card("Unmatched", str(bank_summary["unmatched"]), caption="No candidate found", status="Error", icon="UM")
+        with summary_columns[4]:
+            metric_card(
+                "Opening Balance",
+                str(bank_summary["ignored_opening_balance"]),
+                caption="Ignored from matching",
+                status="Info",
+                icon="OB",
+            )
 
+        transaction_results, opening_balance_results = _split_ignored_opening_balances(bank_result["results"])
         section_card(
-            "Bank Reconciliation Preview",
-            body_html="<p>Preview of deterministic matching results. Possible matches should be reviewed before final close.</p>",
+            "AI Insights Preview",
+            body_html="<p>Review rule-based match signals and optional Vertex AI notes before opening the full bank detail.</p>",
         )
         st.caption(bank_result["message"])
         _show_ai_status(bank_result)
-        st.dataframe(bank_result["results"], use_container_width=True, hide_index=True)
+        st.dataframe(_ai_preview_dataframe(transaction_results), use_container_width=True, hide_index=True)
+
+        section_card(
+            "Bank Reconciliation Detail",
+            body_html="<p>Full transaction-level reconciliation output. Opening balance rows are kept separate from transaction matching.</p>",
+        )
+        st.dataframe(transaction_results, use_container_width=True, hide_index=True)
+        if not opening_balance_results.empty:
+            section_card(
+                "Ignored Opening Balance Rows",
+                body_html="<p>Opening balance rows are shown for auditability but are not used for transaction matching.</p>",
+            )
+            st.dataframe(opening_balance_results, use_container_width=True, hide_index=True)
 
         export_path = Path(bank_result["export_path"])
         file_summary_card(export_path.name, "Bank Reconciliation")
@@ -135,11 +179,17 @@ with gst_tab:
             metric_card("Missing", str(missing_total), caption="Missing in books/GSTR", status="Error", icon="MS")
 
         section_card(
-            "GST Reconciliation Preview",
-            body_html="<p>Preview of invoice-level GST matching results from uploaded returns and accounting records.</p>",
+            "AI Insights Preview",
+            body_html="<p>Review rule-based GST match signals and optional Vertex AI notes before opening the full invoice detail.</p>",
         )
         st.caption(gst_result["message"])
         _show_ai_status(gst_result)
+        st.dataframe(_ai_preview_dataframe(gst_result["results"]), use_container_width=True, hide_index=True)
+
+        section_card(
+            "GST Reconciliation Detail",
+            body_html="<p>Full invoice-level GST matching results from uploaded returns and accounting records.</p>",
+        )
         st.dataframe(gst_result["results"], use_container_width=True, hide_index=True)
 
         export_path = Path(gst_result["export_path"])

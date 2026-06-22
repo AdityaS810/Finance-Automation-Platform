@@ -19,17 +19,28 @@ page_header(
 )
 
 financial_year_options = ["FY24-25", "FY25-26", "FY26-27"]
+organization_options = {
+    "All Organizations": "all",
+    "India - Midoffice Data Solutions Private Limited": "india",
+    "US - Midoffice Data International, Inc": "us",
+}
 
-selector_columns = st.columns([1, 1.2], vertical_alignment="bottom")
+selector_columns = st.columns([1, 1.4, 1.2], vertical_alignment="bottom")
 with selector_columns[0]:
     selected_financial_year = st.selectbox("Financial Year", options=financial_year_options, index=1)
 with selector_columns[1]:
+    selected_organization_label = st.selectbox("Organization", options=list(organization_options), index=0)
+with selector_columns[2]:
     generate_clicked = st.button("Generate MIS Report", type="primary", use_container_width=True)
 
 if generate_clicked:
     try:
         report_output_dir = Path(__file__).resolve().parents[2] / "outputs"
-        result = generate_mis_report(selected_financial_year, report_output_dir)
+        result = generate_mis_report(
+            selected_financial_year,
+            report_output_dir,
+            org_filter=organization_options[selected_organization_label],
+        )
         st.session_state["mis_report_result"] = result
         st.session_state.pop("mis_report_error", None)
         st.success(result["message"])
@@ -45,6 +56,7 @@ if mis_result:
         ("Revenue", mis_result["metrics"]["Revenue"], "Gold monthly P&L", "Success", "RV"),
         ("Expenses", mis_result["metrics"]["Expenses"], "Gold monthly P&L", "Warning", "EX"),
         ("Profit", mis_result["metrics"]["Profit"], "Revenue less expenses", "Success", "PF"),
+        ("Currency", mis_result["metrics"]["Reporting Currency"], "Consolidated reporting", "Info", "INR"),
         ("Journal Adjustments", mis_result["metrics"]["Journal Adjustments"], "Gold journal totals", "Info", "JA"),
         ("Invoices", mis_result["metrics"]["Invoices"], "Dashboard KPI count", "Info", "IN"),
         ("Bills", mis_result["metrics"]["Bills"], "Dashboard KPI count", "Info", "BL"),
@@ -95,6 +107,6 @@ with report_card_columns[1]:
 if mis_result:
     section_card(
         "Monthly MIS Preview",
-        body_html="<p>Preview rows from <strong>finance_gold.mis_monthly_pl</strong> used to reconcile the formatted MIS workbook.</p>",
+        body_html="<p>Preview rows from <strong>finance_gold.mis_monthly_pl</strong>. Gold values are consolidated in INR.</p>",
     )
     st.dataframe(mis_result["monthly_preview"], use_container_width=True, hide_index=True)

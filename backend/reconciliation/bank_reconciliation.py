@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import re
-from datetime import datetime
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -21,6 +20,8 @@ BANK_LINES_VIEW = "finance_silver.fact_bank_statement_lines"
 ACCOUNTING_INPUT_VIEW = "finance_gold.bank_reconciliation_input"
 AMOUNT_TOLERANCE = 1.0
 DATE_TOLERANCE_DAYS = 3
+MATCHED_THRESHOLD = 0.78
+POSSIBLE_MATCH_THRESHOLD = 0.50
 
 
 load_dotenv()
@@ -147,13 +148,19 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
         raise RuntimeError("No uploaded bank statement data found in finance_silver.fact_bank_statement_lines.")
 
     bank_df = _prepare_bank_lines(bank_lines_df)
+    opening_balance_df = bank_df[bank_df["is_opening_balance"]].copy()
+    transaction_bank_df = bank_df[~bank_df["is_opening_balance"]].copy()
     accounting_working_df = _prepare_accounting_lines(accounting_df)
     used_accounting_indexes: set[int] = set()
     result_rows = []
 
-    for _, bank_row in bank_df.iterrows():
+    for _, opening_row in opening_balance_df.iterrows():
+        result_rows.append(_opening_balance_result_row(opening_row))
+
+    for _, bank_row in transaction_bank_df.iterrows():
         best_index = None
         best_score = 0.0
+        best_date_difference = None
         best_reason = "No accounting candidate found."
 
         for accounting_index, accounting_row in accounting_working_df.iterrows():
@@ -168,16 +175,18 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
                 continue
 
             score, reason = _candidate_score(bank_row, accounting_row)
-            if score > best_score:
+            if _is_better_candidate(score, date_difference, best_score, best_date_difference):
                 best_score = score
                 best_index = accounting_index
+                best_date_difference = date_difference
                 best_reason = reason
 
-        if best_index is not None and best_score >= 0.78:
+        if best_index is not None and best_score >= MATCHED_THRESHOLD:
             match_status = "matched"
             used_accounting_indexes.add(best_index)
-        elif best_index is not None and best_score >= 0.50:
+        elif best_index is not None and best_score >= POSSIBLE_MATCH_THRESHOLD:
             match_status = "possible_match"
+            used_accounting_indexes.add(best_index)
         else:
             match_status = "unmatched"
 
@@ -202,7 +211,7 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
 
 
 def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
-    """Normalise bank line columns before matching."""
+    """Normalise and deduplicate bank line columns before matching."""
     working_df = dataframe.copy().reset_index(drop=True)
     if "bank_line_id" not in working_df.columns:
         upload = working_df.get("upload_id", pd.Series("upload", index=working_df.index)).fillna("upload").astype(str)
@@ -210,6 +219,8 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
         bank_line_id = upload + "-" + row_number
     else:
         bank_line_id = working_df["bank_line_id"].fillna("").astype(str)
+        blank_id_mask = bank_line_id.str.strip() == ""
+        bank_line_id.loc[blank_id_mask] = "bank-row-" + (working_df.index[blank_id_mask] + 1).astype(str)
 
     if "bank_amount" not in working_df.columns:
         debit = _numeric_series(working_df, "debit_amount")
@@ -228,7 +239,7 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     else:
         narration = working_df.get("bank_narration", pd.Series("", index=working_df.index))
 
-    return pd.DataFrame(
+    prepared_df = pd.DataFrame(
         {
             "bank_line_id": bank_line_id,
             "bank_date": pd.to_datetime(_value_series(working_df, bank_date_source), errors="coerce").dt.date.astype(str),
@@ -236,6 +247,63 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "bank_amount": bank_amount,
         }
     )
+    prepared_df = prepared_df.assign(
+        normalised_narration=prepared_df["bank_narration"].map(_normalise_text),
+        bank_amount_key=prepared_df["bank_amount"].round(2),
+    )
+    prepared_df = prepared_df.assign(
+        is_opening_balance=prepared_df["normalised_narration"].map(_is_opening_balance_text),
+    )
+
+    # BigQuery uploads can contain repeated headers/opening balances or repeated
+    # raw rows across uploads. Keep one row per bank id and one row per visible
+    # transaction signature so duplicate-looking rows do not create fake matches.
+    prepared_df = prepared_df.drop_duplicates(subset=["bank_line_id"], keep="first")
+    prepared_df = prepared_df.drop_duplicates(
+        subset=["bank_date", "normalised_narration", "bank_amount_key"],
+        keep="first",
+    )
+    return prepared_df.drop(columns=["normalised_narration", "bank_amount_key"]).reset_index(drop=True)
+
+
+def _is_better_candidate(
+    score: float,
+    date_difference: int | None,
+    best_score: float,
+    best_date_difference: int | None,
+) -> bool:
+    """Return True when a candidate beats the current best match."""
+    if score > best_score:
+        return True
+    if score != best_score:
+        return False
+    if best_date_difference is None:
+        return date_difference is not None
+    if date_difference is None:
+        return False
+    return date_difference < best_date_difference
+
+
+def _is_opening_balance_text(normalised_text: str) -> bool:
+    """Detect bank statement opening-balance rows that are not transactions."""
+    return "opening balance" in normalised_text or "opening bal" in normalised_text
+
+
+def _opening_balance_result_row(bank_row: pd.Series) -> dict:
+    """Build an ignored row for opening balances so they are visible but separate."""
+    return {
+        "bank_line_id": bank_row["bank_line_id"],
+        "bank_date": bank_row["bank_date"],
+        "bank_narration": bank_row["bank_narration"],
+        "bank_amount": bank_row["bank_amount"],
+        "accounting_record_id": "",
+        "accounting_date": "",
+        "accounting_party_name": "",
+        "accounting_amount": None,
+        "match_status": "ignored_opening_balance",
+        "confidence_score": 0.0,
+        "match_reason": "Opening balance row ignored for transaction matching.",
+    }
 
 
 def _prepare_accounting_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -301,11 +369,14 @@ def _value_series(dataframe: pd.DataFrame, value: Any) -> pd.Series:
 
 def _summary(results: pd.DataFrame) -> dict:
     """Build Streamlit KPI counts from bank reconciliation results."""
+    ignored_opening_balance = int((results["match_status"] == "ignored_opening_balance").sum())
     return {
         "total_records": int(len(results.index)),
+        "transaction_records": int(len(results.index) - ignored_opening_balance),
         "matched": int((results["match_status"] == "matched").sum()),
         "possible_match": int((results["match_status"] == "possible_match").sum()),
         "unmatched": int((results["match_status"] == "unmatched").sum()),
+        "ignored_opening_balance": ignored_opening_balance,
         "matched_records": int((results["match_status"] == "matched").sum()),
     }
 

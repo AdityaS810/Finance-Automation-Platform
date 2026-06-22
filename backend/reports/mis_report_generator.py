@@ -37,6 +37,24 @@ def _table_name(project_id: str, view_name: str) -> str:
     return f"`{project_id}.{view_name}`"
 
 
+def _normalise_org_filter(org_filter: str | None = None) -> str:
+    """Map UI labels and missing values to safe Gold/Silver org keys."""
+    if not org_filter:
+        return "all"
+    normalised = str(org_filter).strip().lower()
+    aliases = {
+        "all organizations": "all",
+        "all": "all",
+        "india": "india",
+        "in": "india",
+        "us": "us",
+        "u.s.": "us",
+        "usa": "us",
+        "u.s.a": "us",
+    }
+    return aliases.get(normalised, "all")
+
+
 def _financial_year_token(financial_year: str) -> str:
     """Convert FY25-26 to FY2526 for readable output file names."""
     return financial_year.replace("-", "").replace(" ", "").upper()
@@ -156,19 +174,22 @@ def _optional_query_to_dataframe(client: bigquery.Client, query: str, label: str
         return pd.DataFrame()
 
 
-def fetch_gold_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_gold_mis_data(project_id: str | None = None, org_filter: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Query the required Gold MIS views from BigQuery."""
     resolved_project_id = _get_project_id(project_id)
+    selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
 
     monthly_query = f"""
         SELECT *
         FROM {_table_name(resolved_project_id, MIS_MONTHLY_PL_VIEW)}
+        WHERE source_org_key = '{selected_org_key}'
         ORDER BY report_month
     """
     dashboard_query = f"""
         SELECT *
         FROM {_table_name(resolved_project_id, DASHBOARD_SUMMARY_VIEW)}
+        WHERE source_org_key = '{selected_org_key}'
     """
 
     monthly_pl_df = _query_to_dataframe(client, monthly_query)
@@ -177,13 +198,17 @@ def fetch_gold_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd
     return monthly_pl_df, dashboard_summary_df
 
 
-def fetch_optional_silver_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_optional_silver_mis_data(project_id: str | None = None, org_filter: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Query Silver detail views used for top parties and exception alerts."""
     resolved_project_id = _get_project_id(project_id)
+    selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
+    org_filter_sql = "" if selected_org_key == "all" else f"WHERE source_org_key = '{selected_org_key}'"
 
     bills_query = f"""
         SELECT
+            source_org_key,
+            source_org_name,
             bill_id,
             bill_number,
             vendor_id,
@@ -191,12 +216,17 @@ def fetch_optional_silver_mis_data(project_id: str | None = None) -> tuple[pd.Da
             bill_date,
             status,
             total_amount,
+            amount_inr,
             balance_amount,
+            balance_amount_inr,
             gstin
         FROM {_table_name(resolved_project_id, SILVER_BILLS_VIEW)}
+        {org_filter_sql}
     """
     invoices_query = f"""
         SELECT
+            source_org_key,
+            source_org_name,
             invoice_id,
             invoice_number,
             customer_id,
@@ -204,9 +234,12 @@ def fetch_optional_silver_mis_data(project_id: str | None = None) -> tuple[pd.Da
             invoice_date,
             status,
             total_amount,
+            amount_inr,
             balance_amount,
+            balance_amount_inr,
             gstin
         FROM {_table_name(resolved_project_id, SILVER_INVOICES_VIEW)}
+        {org_filter_sql}
     """
 
     bills_df = _optional_query_to_dataframe(client, bills_query, SILVER_BILLS_VIEW)
@@ -292,8 +325,12 @@ def _prepare_top_vendors(bills_df: pd.DataFrame) -> pd.DataFrame:
     working_df = pd.DataFrame(
         {
             "vendor_name": _text_column(bills_df, "vendor_name", "Unknown Vendor"),
-            "total_amount": _numeric_column(bills_df, "total_amount"),
-            "balance_amount": _numeric_column(bills_df, "balance_amount"),
+            "total_amount": _numeric_column(bills_df, "amount_inr")
+            if "amount_inr" in bills_df.columns
+            else _numeric_column(bills_df, "total_amount"),
+            "balance_amount": _numeric_column(bills_df, "balance_amount_inr")
+            if "balance_amount_inr" in bills_df.columns
+            else _numeric_column(bills_df, "balance_amount"),
         }
     )
 
@@ -322,8 +359,12 @@ def _prepare_top_customers(invoices_df: pd.DataFrame) -> pd.DataFrame:
     working_df = pd.DataFrame(
         {
             "customer_name": _text_column(invoices_df, "customer_name", "Unknown Customer"),
-            "total_amount": _numeric_column(invoices_df, "total_amount"),
-            "balance_amount": _numeric_column(invoices_df, "balance_amount"),
+            "total_amount": _numeric_column(invoices_df, "amount_inr")
+            if "amount_inr" in invoices_df.columns
+            else _numeric_column(invoices_df, "total_amount"),
+            "balance_amount": _numeric_column(invoices_df, "balance_amount_inr")
+            if "balance_amount_inr" in invoices_df.columns
+            else _numeric_column(invoices_df, "balance_amount"),
         }
     )
 
@@ -486,7 +527,11 @@ def _invoice_exception_rows(invoices_df: pd.DataFrame) -> list[dict]:
         return []
 
     working_df = invoices_df.copy(deep=True).reset_index(drop=True)
-    balance_amount = _numeric_column(working_df, "balance_amount")
+    balance_amount = (
+        _numeric_column(working_df, "balance_amount_inr")
+        if "balance_amount_inr" in working_df.columns
+        else _numeric_column(working_df, "balance_amount")
+    )
     status = _text_column(working_df, "status").str.lower()
     invoice_number = _text_column(working_df, "invoice_number")
     customer_name = _text_column(working_df, "customer_name")
@@ -511,7 +556,11 @@ def _invoice_exception_rows(invoices_df: pd.DataFrame) -> list[dict]:
                 "Alert Type": "Missing GSTIN",
                 "Severity": "Low",
                 "Reference": invoice_number.loc[index],
-                "Amount": _numeric_column(working_df, "total_amount").loc[index],
+                "Amount": (
+                    _numeric_column(working_df, "amount_inr").loc[index]
+                    if "amount_inr" in working_df.columns
+                    else _numeric_column(working_df, "total_amount").loc[index]
+                ),
                 "Observation": f"Invoice GSTIN is missing for {customer_name.loc[index]}.",
             }
         )
@@ -525,7 +574,11 @@ def _bill_exception_rows(bills_df: pd.DataFrame) -> list[dict]:
         return []
 
     working_df = bills_df.copy(deep=True).reset_index(drop=True)
-    balance_amount = _numeric_column(working_df, "balance_amount")
+    balance_amount = (
+        _numeric_column(working_df, "balance_amount_inr")
+        if "balance_amount_inr" in working_df.columns
+        else _numeric_column(working_df, "balance_amount")
+    )
     status = _text_column(working_df, "status").str.lower()
     bill_number = _text_column(working_df, "bill_number")
     vendor_name = _text_column(working_df, "vendor_name")
@@ -550,7 +603,11 @@ def _bill_exception_rows(bills_df: pd.DataFrame) -> list[dict]:
                 "Alert Type": "Missing GSTIN",
                 "Severity": "Low",
                 "Reference": bill_number.loc[index],
-                "Amount": _numeric_column(working_df, "total_amount").loc[index],
+                "Amount": (
+                    _numeric_column(working_df, "amount_inr").loc[index]
+                    if "amount_inr" in working_df.columns
+                    else _numeric_column(working_df, "total_amount").loc[index]
+                ),
                 "Observation": f"Bill GSTIN is missing for {vendor_name.loc[index]}.",
             }
         )
@@ -606,10 +663,11 @@ def get_mis_metrics(
     monthly_pl_df: pd.DataFrame | None = None,
     dashboard_summary_df: pd.DataFrame | None = None,
     project_id: str | None = None,
+    org_filter: str | None = None,
 ) -> dict:
     """Return Streamlit metric-card values from real Gold layer data."""
     if monthly_pl_df is None or dashboard_summary_df is None:
-        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id)
+        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id, org_filter=org_filter)
 
     monthly_report_df = _prepare_monthly_pl(monthly_pl_df)
     revenue_amount = _safe_sum(monthly_report_df, "Revenue")
@@ -619,6 +677,8 @@ def get_mis_metrics(
 
     return {
         "Financial Year": financial_year,
+        "Organization": _first_value(dashboard_summary_df, "source_org_name", "All Organizations"),
+        "Reporting Currency": _first_value(dashboard_summary_df, "reporting_currency", "INR"),
         "Revenue": _format_currency(revenue_amount),
         "Expenses": _format_currency(expense_amount),
         "Profit": _format_currency(profit_amount),
@@ -688,6 +748,7 @@ def generate_mis_report(
     financial_year: str,
     output_dir: str | Path,
     project_id: str | None = None,
+    org_filter: str | None = None,
     monthly_pl_df: pd.DataFrame | None = None,
     dashboard_summary_df: pd.DataFrame | None = None,
     bills_df: pd.DataFrame | None = None,
@@ -696,11 +757,11 @@ def generate_mis_report(
     """Generate a professional Excel MIS workbook from BigQuery reporting views."""
     should_fetch_optional_silver = monthly_pl_df is None or dashboard_summary_df is None
     if monthly_pl_df is None or dashboard_summary_df is None:
-        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id)
+        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id, org_filter=org_filter)
 
     resolved_project_id = _get_project_id(project_id)
     if should_fetch_optional_silver and (bills_df is None or invoices_df is None):
-        fetched_bills_df, fetched_invoices_df = fetch_optional_silver_mis_data(resolved_project_id)
+        fetched_bills_df, fetched_invoices_df = fetch_optional_silver_mis_data(resolved_project_id, org_filter=org_filter)
         bills_df = fetched_bills_df if bills_df is None else bills_df
         invoices_df = fetched_invoices_df if invoices_df is None else invoices_df
 
@@ -720,7 +781,7 @@ def generate_mis_report(
     top_customers_df = _prepare_top_customers(invoices_df)
     exceptions_df = _prepare_exception_alerts(monthly_report_df, invoices_df, bills_df)
     data_sources_df = _prepare_data_sources(resolved_project_id, generated_at)
-    metrics = get_mis_metrics(financial_year, monthly_pl_df, dashboard_summary_df, project_id)
+    metrics = get_mis_metrics(financial_year, monthly_pl_df, dashboard_summary_df, project_id, org_filter=org_filter)
 
     destination_folder = Path(output_dir)
     destination_folder.mkdir(parents=True, exist_ok=True)
