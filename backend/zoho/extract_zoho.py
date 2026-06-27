@@ -35,6 +35,8 @@ def fetch_paginated(endpoint: str, response_key: str, organization_id: str | Non
 
 def fetch_entity_records(entity_config: ZohoEntityConfig, organization_id: str | None = None) -> list[dict]:
     """Fetch records for any entity described in the Zoho entity config."""
+    if entity_config.name == "bills":
+        return fetch_bills(organization_id=organization_id)
 
     return fetch_paginated(entity_config.endpoint, entity_config.response_key, organization_id=organization_id)
 
@@ -52,7 +54,18 @@ def fetch_invoices(organization_id: str | None = None) -> list[dict]:
 
 
 def fetch_bills(organization_id: str | None = None) -> list[dict]:
-    return fetch_paginated("bills", "bills", organization_id=organization_id)
+    bills = fetch_paginated("bills", "bills", organization_id=organization_id)
+    detailed_bills = []
+    for bill in bills:
+        bill_id = bill.get("bill_id")
+        if not bill_id:
+            detailed_bills.append(bill)
+            continue
+
+        detail_response = zoho_get(f"bills/{bill_id}", organization_id=organization_id)
+        detailed_bills.append(detail_response.get("bill", bill))
+
+    return detailed_bills
 
 
 def fetch_customer_payments(organization_id: str | None = None) -> list[dict]:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import streamlit as st
 
 from backend.services.upload_service import save_bank_statement_upload, save_gstr_upload
-from src.ingestion.bank_csv_parser import parse_bank_csv
+from src.ingestion.bank_csv_parser import parse_bank_csv, parse_bank_excel
 from src.ingestion.bank_pdf_parser import parse_bank_pdf
 from src.ingestion.gstr_excel_parser import parse_gstr_excel
 from src.ingestion.gstr_json_parser import parse_gstr_json
@@ -57,32 +57,48 @@ bank_tab, gstr_tab = st.tabs(["Bank Statement", "GSTR Report"])
 with bank_tab:
     section_card(
         "Upload Bank Statement",
-        body_html="<p>Accepted formats: CSV, PDF</p>",
+        body_html="<p>Accepted formats: CSV, Excel, PDF</p>",
     )
 
     uploaded_bank_file = st.file_uploader(
         "Upload and Process",
-        type=["csv", "pdf"],
+        type=["csv", "xlsx", "xls", "pdf"],
         key="bank_statement_upload",
         label_visibility="collapsed",
     )
 
     if uploaded_bank_file is not None:
-        if uploaded_bank_file.name.lower().endswith(".csv"):
-            bank_df = parse_bank_csv(uploaded_bank_file)
-            bank_df = remove_duplicate_columns(bank_df)
-            validation_result = validate_required_columns(bank_df, bank_required_columns)
+        try:
+            if uploaded_bank_file.name.lower().endswith(".csv"):
+                bank_df = parse_bank_csv(uploaded_bank_file)
+                bank_df = remove_duplicate_columns(bank_df)
+                validation_result = validate_required_columns(bank_df, bank_required_columns)
 
-        elif uploaded_bank_file.name.lower().endswith(".pdf"):
-            bank_df = parse_bank_pdf(uploaded_bank_file)
-            bank_df = remove_duplicate_columns(bank_df)
-            validation_result = validate_required_columns(bank_df, bank_required_columns)
-            st.info("PDF extraction is still using a placeholder parser. The expected output structure is shown below.")
+            elif uploaded_bank_file.name.lower().endswith((".xlsx", ".xls")):
+                bank_df = parse_bank_excel(uploaded_bank_file)
+                bank_df = remove_duplicate_columns(bank_df)
+                validation_result = validate_required_columns(bank_df, bank_required_columns)
 
-        else:
+            elif uploaded_bank_file.name.lower().endswith(".pdf"):
+                bank_df = parse_bank_pdf(uploaded_bank_file)
+                bank_df = remove_duplicate_columns(bank_df)
+                validation_result = validate_required_columns(bank_df, bank_required_columns)
+                st.info("PDF extraction is still using a placeholder parser. The expected output structure is shown below.")
+
+            else:
+                bank_df = None
+                validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
+                st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+        except ValueError as error:
             bank_df = None
             validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
-            st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+            st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
+            st.error(str(error))
+        except Exception as error:
+            bank_df = None
+            validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
+            st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
+            st.error(f"Bank statement could not be parsed: {error}")
 
         if bank_df is not None:
             file_summary_card(uploaded_bank_file.name, "Bank Statement", row_count=len(bank_df.index))
@@ -133,17 +149,26 @@ with gstr_tab:
     )
 
     if uploaded_gstr_file is not None:
-        if uploaded_gstr_file.name.lower().endswith(".json"):
-            gstr_df = parse_gstr_json(uploaded_gstr_file)
-            gstr_df = remove_duplicate_columns(gstr_df)
+        try:
+            if uploaded_gstr_file.name.lower().endswith(".json"):
+                gstr_df = parse_gstr_json(uploaded_gstr_file)
+                gstr_df = remove_duplicate_columns(gstr_df)
 
-        elif uploaded_gstr_file.name.lower().endswith((".xlsx", ".xls")):
-            gstr_df = parse_gstr_excel(uploaded_gstr_file)
-            gstr_df = remove_duplicate_columns(gstr_df)
+            elif uploaded_gstr_file.name.lower().endswith((".xlsx", ".xls")):
+                gstr_df = parse_gstr_excel(uploaded_gstr_file)
+                gstr_df = remove_duplicate_columns(gstr_df)
 
-        else:
+            else:
+                gstr_df = None
+                st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+        except ValueError as error:
             gstr_df = None
-            st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+            st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
+            st.error(str(error))
+        except Exception as error:
+            gstr_df = None
+            st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
+            st.error(f"GSTR file could not be parsed: {error}")
 
         if gstr_df is not None:
             validation_result = validate_required_columns(gstr_df, gstr_required_columns)

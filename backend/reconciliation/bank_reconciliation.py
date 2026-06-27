@@ -2,20 +2,24 @@
 
 from __future__ import annotations
 
-import os
 import re
+from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
-from dotenv import load_dotenv
 from google.cloud import bigquery
 
 from backend.ai.reconciliation_insights import add_bank_ai_insights
+from backend.reconciliation.upload_registry import (
+    get_project_id,
+    get_upload_metadata,
+    query_to_dataframe,
+    table_name,
+)
 
 
-DEFAULT_PROJECT_ID = "internal-project-work-497507"
 BANK_LINES_VIEW = "finance_silver.fact_bank_statement_lines"
 ACCOUNTING_INPUT_VIEW = "finance_gold.bank_reconciliation_input"
 AMOUNT_TOLERANCE = 1.0
@@ -24,30 +28,16 @@ MATCHED_THRESHOLD = 0.78
 POSSIBLE_MATCH_THRESHOLD = 0.50
 
 
-load_dotenv()
-
-
-def _get_project_id(project_id: str | None = None) -> str:
-    """Resolve the BigQuery project id without requiring code changes."""
-    return project_id or os.getenv("GCP_PROJECT_ID") or DEFAULT_PROJECT_ID
-
-
-def _table_name(project_id: str, view_name: str) -> str:
-    """Build a fully qualified BigQuery view name."""
-    return f"`{project_id}.{view_name}`"
-
-
-def _query_to_dataframe(client: bigquery.Client, query: str) -> pd.DataFrame:
-    """Run a BigQuery query and convert rows to pandas without optional extras."""
-    result = client.query(query).result()
-    columns = [field.name for field in result.schema]
-    rows = [dict(row.items()) for row in result]
-    return pd.DataFrame(rows, columns=columns)
-
-
-def fetch_bank_reconciliation_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_bank_reconciliation_data(
+    project_id: str | None = None,
+    upload_id: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Fetch uploaded bank lines and accounting reconciliation input from BigQuery."""
-    resolved_project_id = _get_project_id(project_id)
+    resolved_project_id = get_project_id(project_id)
+    selected_upload = get_upload_metadata("bank_statement", upload_id, resolved_project_id)
+    if not selected_upload:
+        raise RuntimeError("Please upload a bank statement first.")
+
     client = bigquery.Client(project=resolved_project_id)
 
     bank_query = f"""
@@ -57,8 +47,12 @@ def fetch_bank_reconciliation_data(project_id: str | None = None) -> tuple[pd.Da
             raw_row_number,
             transaction_date AS bank_date,
             narration AS bank_narration,
+            debit_amount,
+            credit_amount,
+            balance_amount,
             COALESCE(credit_amount, 0) - COALESCE(debit_amount, 0) AS bank_amount
-        FROM {_table_name(resolved_project_id, BANK_LINES_VIEW)}
+        FROM {table_name(resolved_project_id, BANK_LINES_VIEW)}
+        WHERE upload_id = @upload_id
         ORDER BY transaction_date, upload_id, raw_row_number
     """
     accounting_query = f"""
@@ -70,11 +64,16 @@ def fetch_bank_reconciliation_data(project_id: str | None = None) -> tuple[pd.Da
             transaction_number,
             transaction_type,
             transaction_amount AS accounting_amount
-        FROM {_table_name(resolved_project_id, ACCOUNTING_INPUT_VIEW)}
+        FROM {table_name(resolved_project_id, ACCOUNTING_INPUT_VIEW)}
         ORDER BY transaction_date, transaction_id
     """
 
-    return _query_to_dataframe(client, bank_query), _query_to_dataframe(client, accounting_query)
+    bank_df = query_to_dataframe(
+        client,
+        bank_query,
+        [bigquery.ScalarQueryParameter("upload_id", "STRING", selected_upload["upload_id"])],
+    )
+    return bank_df, query_to_dataframe(client, accounting_query)
 
 
 def _normalise_text(value: Any) -> str:
@@ -228,6 +227,14 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
         bank_amount = credit - debit
     else:
         bank_amount = _numeric_series(working_df, "bank_amount")
+        debit = _numeric_series(working_df, "debit_amount")
+        credit = _numeric_series(working_df, "credit_amount")
+        debit = debit.where(debit != 0, bank_amount.where(bank_amount < 0, 0).abs())
+        credit = credit.where(credit != 0, bank_amount.where(bank_amount > 0, 0))
+
+    balance_amount = _numeric_series(working_df, "balance_amount")
+    upload_id = _text_series(working_df, working_df.get("upload_id", ""))
+    raw_row_number = _text_series(working_df, working_df.get("raw_row_number", ""))
 
     if "bank_date" not in working_df.columns and "transaction_date" in working_df.columns:
         bank_date_source = working_df["transaction_date"]
@@ -242,14 +249,21 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     prepared_df = pd.DataFrame(
         {
             "bank_line_id": bank_line_id,
+            "upload_id": upload_id,
+            "raw_row_number": raw_row_number,
             "bank_date": pd.to_datetime(_value_series(working_df, bank_date_source), errors="coerce").dt.date.astype(str),
             "bank_narration": _text_series(working_df, narration),
+            "debit_amount": debit,
+            "credit_amount": credit,
+            "balance_amount": balance_amount,
             "bank_amount": bank_amount,
         }
     )
     prepared_df = prepared_df.assign(
         normalised_narration=prepared_df["bank_narration"].map(_normalise_text),
-        bank_amount_key=prepared_df["bank_amount"].round(2),
+        debit_key=prepared_df["debit_amount"].round(2),
+        credit_key=prepared_df["credit_amount"].round(2),
+        balance_key=prepared_df["balance_amount"].round(2),
     )
     prepared_df = prepared_df.assign(
         is_opening_balance=prepared_df["normalised_narration"].map(_is_opening_balance_text),
@@ -260,10 +274,10 @@ def _prepare_bank_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     # transaction signature so duplicate-looking rows do not create fake matches.
     prepared_df = prepared_df.drop_duplicates(subset=["bank_line_id"], keep="first")
     prepared_df = prepared_df.drop_duplicates(
-        subset=["bank_date", "normalised_narration", "bank_amount_key"],
+        subset=["bank_date", "normalised_narration", "debit_key", "credit_key", "balance_key"],
         keep="first",
     )
-    return prepared_df.drop(columns=["normalised_narration", "bank_amount_key"]).reset_index(drop=True)
+    return prepared_df.drop(columns=["normalised_narration", "debit_key", "credit_key", "balance_key"]).reset_index(drop=True)
 
 
 def _is_better_candidate(
@@ -367,10 +381,11 @@ def _value_series(dataframe: pd.DataFrame, value: Any) -> pd.Series:
     return pd.Series(value, index=dataframe.index, dtype="object")
 
 
-def _summary(results: pd.DataFrame) -> dict:
+def _summary(results: pd.DataFrame, uploaded_rows: int | None = None) -> dict:
     """Build Streamlit KPI counts from bank reconciliation results."""
     ignored_opening_balance = int((results["match_status"] == "ignored_opening_balance").sum())
     return {
+        "uploaded_bank_rows": int(uploaded_rows if uploaded_rows is not None else len(results.index)),
         "total_records": int(len(results.index)),
         "transaction_records": int(len(results.index) - ignored_opening_balance),
         "matched": int((results["match_status"] == "matched").sum()),
@@ -381,30 +396,123 @@ def _summary(results: pd.DataFrame) -> dict:
     }
 
 
+def _metadata_from_upload_dataframe(dataframe: pd.DataFrame, source_type: str) -> dict[str, Any]:
+    """Build minimal metadata when tests pass dataframes directly."""
+    upload_id = ""
+    if "upload_id" in dataframe.columns and not dataframe.empty:
+        upload_id = str(dataframe["upload_id"].dropna().astype(str).iloc[0])
+    return {
+        "upload_id": upload_id,
+        "file_name": "Provided dataframe",
+        "uploaded_at": "",
+        "source_type": source_type,
+        "row_count": len(dataframe.index),
+    }
+
+
+def _add_run_metadata(
+    results: pd.DataFrame,
+    upload_metadata: dict[str, Any],
+    reconciliation_timestamp: str,
+) -> pd.DataFrame:
+    """Add selected upload details to every result row for Excel auditability."""
+    enriched_df = results.copy()
+    enriched_df.insert(0, "reconciliation_timestamp", reconciliation_timestamp)
+    enriched_df.insert(0, "selected_file_name", upload_metadata.get("file_name", ""))
+    enriched_df.insert(0, "selected_upload_id", upload_metadata.get("upload_id", ""))
+    return enriched_df
+
+
+def _metadata_sheet(upload_metadata: dict[str, Any], reconciliation_timestamp: str) -> pd.DataFrame:
+    """Create a one-row workbook metadata sheet."""
+    return pd.DataFrame(
+        [
+            {
+                "selected_upload_id": upload_metadata.get("upload_id", ""),
+                "selected_file_name": upload_metadata.get("file_name", ""),
+                "selected_uploaded_at": str(upload_metadata.get("uploaded_at", "")),
+                "source_type": upload_metadata.get("source_type", "bank_statement"),
+                "uploaded_row_count": upload_metadata.get("row_count", ""),
+                "reconciliation_timestamp": reconciliation_timestamp,
+            }
+        ]
+    )
+
+
 def run_bank_reconciliation(
     output_dir: str | Path,
     project_id: str | None = None,
+    selected_upload_id: str | None = None,
+    selected_upload_metadata: dict[str, Any] | None = None,
     bank_lines_df: pd.DataFrame | None = None,
     accounting_df: pd.DataFrame | None = None,
+    generate_ai_insights: bool = True,
+    max_ai_rows: int = 10,
 ) -> dict:
     """Run deterministic bank reconciliation and write an Excel export."""
+    upload_metadata = selected_upload_metadata
     if bank_lines_df is None or accounting_df is None:
-        bank_lines_df, accounting_df = fetch_bank_reconciliation_data(project_id)
+        resolved_project_id = get_project_id(project_id)
+        upload_metadata = get_upload_metadata("bank_statement", selected_upload_id, resolved_project_id)
+        if not upload_metadata:
+            raise RuntimeError("Please upload a bank statement first.")
+        bank_lines_df, accounting_df = fetch_bank_reconciliation_data(
+            resolved_project_id,
+            upload_metadata["upload_id"],
+        )
+    elif upload_metadata is None:
+        upload_metadata = _metadata_from_upload_dataframe(bank_lines_df, "bank_statement")
 
+    uploaded_rows = len(bank_lines_df.index)
     results = reconcile_bank_data(bank_lines_df, accounting_df)
-    results, ai_metadata = add_bank_ai_insights(results)
+    if generate_ai_insights:
+        try:
+            results, ai_metadata = add_bank_ai_insights(results, max_rows=max_ai_rows)
+        except Exception as error:
+            print(f"[Bank Reconciliation] Vertex AI insights failed: {error}")
+            results = _ensure_ai_columns(results)
+            ai_metadata = {
+                "ai_status": "unavailable",
+                "ai_enabled": False,
+                "ai_message": "Vertex AI insights unavailable. Showing rule-based reconciliation only.",
+                "ai_rows_processed": 0,
+                "ai_max_rows": max_ai_rows,
+            }
+    else:
+        results = _ensure_ai_columns(results)
+        ai_metadata = {
+            "ai_status": "skipped",
+            "ai_enabled": False,
+            "ai_message": "Vertex AI insights skipped. Showing rule-based reconciliation only.",
+            "ai_rows_processed": 0,
+            "ai_max_rows": 0,
+        }
+    reconciliation_timestamp = datetime.now(timezone.utc).isoformat()
+    results = _add_run_metadata(results, upload_metadata, reconciliation_timestamp)
     destination_folder = Path(output_dir)
     destination_folder.mkdir(parents=True, exist_ok=True)
     export_path = destination_folder / "bank_reconciliation_results.xlsx"
 
     with pd.ExcelWriter(export_path, engine="openpyxl") as writer:
         results.to_excel(writer, sheet_name="Bank Reconciliation", index=False)
+        _metadata_sheet(upload_metadata, reconciliation_timestamp).to_excel(writer, sheet_name="Run Metadata", index=False)
 
     return {
-        "summary": _summary(results),
+        "summary": _summary(results, uploaded_rows),
         "results": results,
         "export_path": export_path,
+        "selected_upload": upload_metadata,
+        "reconciliation_timestamp": reconciliation_timestamp,
         "is_placeholder": False,
         "message": "Bank reconciliation completed using deterministic BigQuery-backed matching.",
         **ai_metadata,
     }
+
+
+def _ensure_ai_columns(results: pd.DataFrame) -> pd.DataFrame:
+    """Keep Streamlit/Excel columns stable when Vertex AI is skipped."""
+    enriched_df = results.copy()
+    for column_name in ["ai_summary", "ai_recommendation", "ai_risk_level"]:
+        if column_name not in enriched_df.columns:
+            enriched_df[column_name] = ""
+    return enriched_df

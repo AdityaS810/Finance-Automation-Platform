@@ -30,12 +30,12 @@ def add_bank_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) 
     enriched_df = _with_ai_columns(results_df)
     uncertain_indexes = _bank_uncertain_indexes(enriched_df).index
     if len(uncertain_indexes) == 0:
-        return enriched_df, _ai_metadata("not_required", "No uncertain bank rows required Vertex AI insights.", 0)
+        return enriched_df, _ai_metadata("not_required", "No uncertain bank rows required Vertex AI insights.", 0, max_rows)
 
     _apply_rule_based_insights(enriched_df, uncertain_indexes, "bank")
     vertex_indexes = list(uncertain_indexes[:max_rows])
     if not is_vertex_gemini_configured():
-        return enriched_df, _ai_metadata("unavailable", AI_UNAVAILABLE_MESSAGE, 0)
+        return enriched_df, _ai_metadata("unavailable", AI_UNAVAILABLE_MESSAGE, 0, max_rows)
 
     rows_enriched = 0
     for row_index in vertex_indexes:
@@ -55,7 +55,7 @@ def add_bank_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) 
         if rows_enriched > 0
         else AI_UNAVAILABLE_MESSAGE
     )
-    return enriched_df, _ai_metadata(status, message, rows_enriched)
+    return enriched_df, _ai_metadata(status, message, rows_enriched, max_rows)
 
 
 def add_gst_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) -> tuple[pd.DataFrame, dict]:
@@ -63,12 +63,12 @@ def add_gst_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) -
     enriched_df = _with_ai_columns(results_df)
     exception_indexes = _gst_exception_indexes(enriched_df).index
     if len(exception_indexes) == 0:
-        return enriched_df, _ai_metadata("not_required", "No GST exceptions required Vertex AI insights.", 0)
+        return enriched_df, _ai_metadata("not_required", "No GST exceptions required Vertex AI insights.", 0, max_rows)
 
     _apply_rule_based_insights(enriched_df, exception_indexes, "gst")
     vertex_indexes = list(exception_indexes[:max_rows])
     if not is_vertex_gemini_configured():
-        return enriched_df, _ai_metadata("unavailable", AI_UNAVAILABLE_MESSAGE, 0)
+        return enriched_df, _ai_metadata("unavailable", AI_UNAVAILABLE_MESSAGE, 0, max_rows)
 
     rows_enriched = 0
     for row_index in vertex_indexes:
@@ -88,7 +88,7 @@ def add_gst_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) -
         if rows_enriched > 0
         else AI_UNAVAILABLE_MESSAGE
     )
-    return enriched_df, _ai_metadata(status, message, rows_enriched)
+    return enriched_df, _ai_metadata(status, message, rows_enriched, max_rows)
 
 
 def _with_ai_columns(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -140,7 +140,30 @@ def _bank_uncertain_indexes(dataframe: pd.DataFrame) -> pd.DataFrame:
 def _gst_exception_indexes(dataframe: pd.DataFrame) -> pd.DataFrame:
     """Select GST rows where Gemini can help explain a review decision."""
     status = dataframe.get("match_status", pd.Series("", index=dataframe.index)).astype(str)
-    return dataframe[status.isin(["mismatch", "missing_in_books", "missing_in_gstr"])]
+    exceptions_df = dataframe[
+        status.isin(["amount_mismatch", "mismatch", "possible_match", "missing_in_books", "missing_in_gstr"])
+    ]
+    dedupe_columns = [
+        column_name
+        for column_name in [
+            "match_status",
+            "gstin",
+            "invoice_number",
+            "invoice_date",
+            "taxable_value_gstr",
+            "taxable_value_books",
+            "igst_gstr",
+            "igst_books",
+            "cgst_gstr",
+            "cgst_books",
+            "sgst_gstr",
+            "sgst_books",
+        ]
+        if column_name in exceptions_df.columns
+    ]
+    if dedupe_columns:
+        return exceptions_df.drop_duplicates(subset=dedupe_columns, keep="first")
+    return exceptions_df
 
 
 def _bank_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
@@ -189,13 +212,31 @@ def _gst_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
     reason = _row_text(row, "match_reason")
     reason_lower = reason.lower()
     status = _row_text(row, "match_status").lower()
+    match_level = _row_text(row, "match_level").upper()
     tax_difference = _gst_tax_difference(row)
     taxable_difference = _gst_taxable_difference(row)
+    invoice_number = _row_text(row, "invoice_number") or "this invoice"
+    supplier_name = _row_text(row, "supplier_name") or _row_text(row, "party_name") or "the supplier"
+    amount_difference = max(tax_difference or 0, taxable_difference or 0)
 
     if status == "missing_in_books" or "no accounting" in reason_lower:
-        return "This invoice is missing from accounting books, so confirm source records before filing."
+        return f"Invoice {invoice_number} from {supplier_name} is present in GSTR but missing in books."
     if status == "missing_in_gstr" or "not found in uploaded gstr" in reason_lower:
-        return "The accounting GST record is missing in GSTR data, so verify filing completeness."
+        return f"Invoice {invoice_number} exists in books but is missing from the uploaded GSTR report."
+    if status == "matched":
+        return f"Invoice {invoice_number} matches between books and GSTR with no tax difference."
+    if status in {"amount_mismatch", "mismatch"} and amount_difference > 0:
+        return f"Invoice {invoice_number} matched by GSTIN and invoice number, but values differ by {amount_difference:.2f}."
+    if status == "possible_match" and match_level == "P4_WEAK_INVOICE":
+        return f"Invoice {invoice_number} exists in GSTR, but GSTIN, date, value, or formatting needs review."
+    if status == "possible_match" and match_level.startswith("P6_SAFEGUARD"):
+        return f"Invoice {invoice_number} has evidence in the selected GSTR upload and should not be treated as missing without review."
+    if status == "possible_match" and match_level == "P3_FORMAT":
+        return f"Invoice {invoice_number} matched after invoice-number formatting cleanup and needs review."
+    if status == "possible_match" and match_level == "P5_AMOUNT_DATE_CANDIDATE":
+        return f"Invoice {invoice_number} is an amount, nearby-date, and supplier-name candidate requiring manual review."
+    if status == "possible_match":
+        return f"Invoice {invoice_number} has a similar invoice-number candidate and needs manual review."
     if "gstin" in reason_lower and "invoice" not in reason_lower:
         return "GSTIN details do not align between records, so this invoice needs review."
     if "invoice" in reason_lower and "matched" not in reason_lower:
@@ -212,10 +253,21 @@ def _gst_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
 def _gst_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str:
     """Recommend a GST review action from the deterministic reason."""
     status = _row_text(row, "match_status").lower()
+    match_level = _row_text(row, "match_level").upper()
     reason_lower = _row_text(row, "match_reason").lower()
     if status in {"missing_in_books", "missing_in_gstr"}:
         return "Confirm whether this is a timing difference or duplicate entry."
-    if "invoice" in reason_lower or "tax" in reason_lower or status == "mismatch":
+    if status == "possible_match":
+        if match_level == "P4_WEAK_INVOICE":
+            return "Compare GSTIN, invoice date, and values before treating this as reconciled."
+        if match_level.startswith("P6_SAFEGUARD"):
+            return "Review the candidate GSTR row against Zoho/books before taking filing action."
+        if match_level == "P3_FORMAT":
+            return "Confirm formatted invoice number against source documents."
+        if match_level == "P5_AMOUNT_DATE_CANDIDATE":
+            return "Compare source invoice, books record, and GSTR row."
+        return "Confirm invoice number against source documents before matching."
+    if "invoice" in reason_lower or "tax" in reason_lower or status in {"amount_mismatch", "mismatch"}:
         return "Check invoice number and tax values before filing."
     if "gstin" in reason_lower:
         return "Verify GSTIN against vendor master and source invoice."
@@ -242,10 +294,11 @@ def _gst_prompt(row: pd.Series) -> str:
     context = {
         "GSTIN": _safe_value(row.get("gstin")),
         "invoice_number": _safe_value(row.get("invoice_number")),
-        "gstr_taxable_value": _safe_value(row.get("gstr_taxable_value")),
-        "books_taxable_value": _safe_value(row.get("books_taxable_value")),
-        "gstr_tax_amount": _safe_value(row.get("gstr_tax_amount")),
-        "books_tax_amount": _safe_value(row.get("books_tax_amount")),
+        "taxable_value_gstr": _safe_value(row.get("taxable_value_gstr")),
+        "taxable_value_books": _safe_value(row.get("taxable_value_books")),
+        "tax_amount_gstr": _safe_value(row.get("tax_amount_gstr")),
+        "tax_amount_books": _safe_value(row.get("tax_amount_books")),
+        "rule_based_match_level": _safe_value(row.get("match_level")),
         "rule_based_match_status": _safe_value(row.get("match_status")),
         "rule_based_match_reason": _safe_value(row.get("match_reason")),
     }
@@ -499,8 +552,12 @@ def _bank_date_difference(row: pd.Series | dict[str, Any] | None) -> int | None:
 
 def _gst_tax_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
     """Compute total GST tax difference if both values are present."""
-    gstr_tax = _numeric_value(_row_value(row, "gstr_tax_amount"))
-    books_tax = _numeric_value(_row_value(row, "books_tax_amount"))
+    gstr_tax = _numeric_value(_row_value(row, "tax_amount_gstr"))
+    if gstr_tax is None:
+        gstr_tax = _numeric_value(_row_value(row, "gstr_tax_amount"))
+    books_tax = _numeric_value(_row_value(row, "tax_amount_books"))
+    if books_tax is None:
+        books_tax = _numeric_value(_row_value(row, "books_tax_amount"))
     if gstr_tax is None or books_tax is None:
         return None
     return abs(gstr_tax - books_tax)
@@ -508,8 +565,12 @@ def _gst_tax_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
 
 def _gst_taxable_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
     """Compute taxable value difference if both values are present."""
-    gstr_taxable = _numeric_value(_row_value(row, "gstr_taxable_value"))
-    books_taxable = _numeric_value(_row_value(row, "books_taxable_value"))
+    gstr_taxable = _numeric_value(_row_value(row, "taxable_value_gstr"))
+    if gstr_taxable is None:
+        gstr_taxable = _numeric_value(_row_value(row, "gstr_taxable_value"))
+    books_taxable = _numeric_value(_row_value(row, "taxable_value_books"))
+    if books_taxable is None:
+        books_taxable = _numeric_value(_row_value(row, "books_taxable_value"))
     if gstr_taxable is None or books_taxable is None:
         return None
     return abs(gstr_taxable - books_taxable)
@@ -523,6 +584,8 @@ def _risk_level_from_row(row: pd.Series | dict[str, Any] | None, reconciliation_
         return "high"
 
     if reconciliation_type == "gst":
+        if status == "possible_match":
+            return "medium"
         amount_difference = max(_gst_tax_difference(row) or 0, _gst_taxable_difference(row) or 0)
         if amount_difference >= 1000:
             return "high"
@@ -553,12 +616,12 @@ def _risk_level(value: Any) -> str:
     return "medium"
 
 
-def _ai_metadata(status: str, message: str, rows_processed: int) -> dict:
+def _ai_metadata(status: str, message: str, rows_processed: int, max_rows: int = MAX_AI_ROWS) -> dict:
     """Build consistent metadata for backend returns and Streamlit messages."""
     return {
         "ai_status": status,
         "ai_enabled": status == "enabled",
         "ai_message": message,
         "ai_rows_processed": rows_processed,
-        "ai_max_rows": MAX_AI_ROWS,
+        "ai_max_rows": max_rows,
     }
