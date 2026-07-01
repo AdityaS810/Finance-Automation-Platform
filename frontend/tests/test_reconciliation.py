@@ -5,7 +5,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from backend.ai.reconciliation_insights import _parse_ai_response
+from backend.ai.reconciliation_insights import _parse_ai_response, _rule_based_insight
 from backend.reconciliation.bank_reconciliation import run_bank_reconciliation
 from backend.reconciliation.gst_reconciliation import reconcile_gst_data, run_gst_reconciliation
 
@@ -1008,3 +1008,48 @@ def test_ai_response_parser_has_clean_fallback_for_bad_json():
     assert "```" not in parsed["ai_summary"]
     assert "{" not in parsed["ai_summary"]
     assert "}" not in parsed["ai_summary"]
+
+
+def test_bank_not_in_books_risk_is_amount_aware():
+    small_row = pd.Series(
+        {
+            "match_status": "bank_not_in_books",
+            "bank_amount": -8.06,
+            "match_reason": "Bank statement transaction was not found in accounting records.",
+        }
+    )
+    large_row = pd.Series(
+        {
+            "match_status": "bank_not_in_books",
+            "bank_amount": -1000,
+            "match_reason": "Bank statement transaction was not found in accounting records.",
+        }
+    )
+
+    small_insight = _rule_based_insight(small_row, "bank")
+    large_insight = _rule_based_insight(large_row, "bank")
+
+    assert small_insight["ai_risk_level"] == "medium"
+    assert "bank charge, fee, GST charge" in small_insight["ai_recommendation"]
+    assert large_insight["ai_risk_level"] == "high"
+    assert "payment, expense, or journal" in large_insight["ai_recommendation"]
+
+
+def test_books_not_in_bank_risk_is_amount_aware():
+    small_row = pd.Series(
+        {
+            "match_status": "books_not_in_bank",
+            "accounting_amount": 999.99,
+            "match_reason": "Accounting-side transaction was not found in uploaded bank statement.",
+        }
+    )
+    large_row = pd.Series(
+        {
+            "match_status": "books_not_in_bank",
+            "accounting_amount": 1000,
+            "match_reason": "Accounting-side transaction was not found in uploaded bank statement.",
+        }
+    )
+
+    assert _rule_based_insight(small_row, "bank")["ai_risk_level"] == "medium"
+    assert _rule_based_insight(large_row, "bank")["ai_risk_level"] == "high"

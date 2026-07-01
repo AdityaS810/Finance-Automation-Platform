@@ -227,7 +227,10 @@ def _bank_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str
     context = _bank_recommendation_context(row, amount_difference, date_difference)
 
     if status == "bank_not_in_books" or "no accounting" in reason_lower or status == "unmatched":
-        return f"Create missing Zoho payment or expense entry if genuine; use {context}."
+        bank_amount = _numeric_value(_row_value(row, "bank_amount"))
+        if bank_amount is not None and abs(bank_amount) < 1000:
+            return f"Check bank charge, fee, GST charge, or small adjustment before posting; use {context}."
+        return f"Create missing Zoho payment, expense, or journal if genuine; use {context}."
     if status == "books_not_in_bank":
         return f"Check another bank account, period, or grouped settlement using {context}."
     if "salary" in reason_lower or "tax" in reason_lower or "charge" in reason_lower or "transfer" in reason_lower:
@@ -666,6 +669,28 @@ def _bank_recommendation_context(
     return ", ".join(parts[:4]) if parts else "available amount/date signals"
 
 
+def _bank_only_risk_from_amount(row: pd.Series | dict[str, Any] | None) -> str:
+    """Risk for bank lines absent from books, scaled by bank amount."""
+    bank_amount = _numeric_value(_row_value(row, "bank_amount"))
+    if bank_amount is None:
+        return "high"
+    if abs(bank_amount) >= 100000:
+        return "high"
+    if abs(bank_amount) >= 1000:
+        return "high"
+    return "medium"
+
+
+def _books_only_risk_from_amount(row: pd.Series | dict[str, Any] | None) -> str:
+    """Risk for accounting entries absent from bank, scaled by books amount."""
+    accounting_amount = _numeric_value(_row_value(row, "accounting_amount"))
+    if accounting_amount is None:
+        return "high"
+    if abs(accounting_amount) >= 1000:
+        return "high"
+    return "medium"
+
+
 def _gst_tax_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
     """Compute total GST tax difference if both values are present."""
     gstr_tax = _numeric_value(_row_value(row, "tax_amount_gstr"))
@@ -713,8 +738,10 @@ def _risk_level_from_row(row: pd.Series | dict[str, Any] | None, reconciliation_
     """Set risk from deterministic exception size and type."""
     reason_lower = _row_text(row, "match_reason").lower()
     status = _row_text(row, "match_status").lower()
-    if status in {"bank_not_in_books", "books_not_in_bank"}:
-        return "high"
+    if status == "bank_not_in_books":
+        return _bank_only_risk_from_amount(row)
+    if status == "books_not_in_bank":
+        return _books_only_risk_from_amount(row)
     if "missing" in status or "missing" in reason_lower or "no accounting" in reason_lower:
         return "high"
 
