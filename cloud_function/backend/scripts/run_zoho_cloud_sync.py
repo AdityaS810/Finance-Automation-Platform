@@ -6,6 +6,8 @@ from dotenv import load_dotenv
 from backend.zoho.extract_zoho import (
     fetch_accounts,
     fetch_contacts,
+    fetch_customer_payments,
+    fetch_expenses,
     fetch_invoices,
     fetch_journals,
 )
@@ -49,6 +51,18 @@ def main():
             "id_field": "invoice_id",
         },
         {
+            "name": "expenses",
+            "fetch_func": fetch_expenses,
+            "bq_table": "zoho_raw",
+            "id_field": "expense_id",
+        },
+        {
+            "name": "customer_payments",
+            "fetch_func": fetch_customer_payments,
+            "bq_table": "zoho_raw",
+            "id_field": "payment_id",
+        },
+        {
             "name": "transactions",
             "fetch_func": fetch_journals,
             "bq_table": "zoho_transactions_raw",
@@ -87,6 +101,7 @@ def main():
             entity_name=entity["name"],
             id_field=entity["id_field"],
         )
+        print(f"Loaded {len(data)} {entity['name']} rows")
 
     print("Zoho cloud sync completed successfully.")
 

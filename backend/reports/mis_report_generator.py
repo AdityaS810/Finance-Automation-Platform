@@ -56,6 +56,24 @@ def _table_name(project_id: str, view_name: str) -> str:
     return f"`{project_id}.{view_name}`"
 
 
+def _normalise_org_filter(org_filter: str | None = None) -> str:
+    """Map UI labels and missing values to safe Gold/Silver org keys."""
+    if not org_filter:
+        return "all"
+    normalised = str(org_filter).strip().lower()
+    aliases = {
+        "all organizations": "all",
+        "all": "all",
+        "india": "india",
+        "in": "india",
+        "us": "us",
+        "u.s.": "us",
+        "usa": "us",
+        "u.s.a": "us",
+    }
+    return aliases.get(normalised, "all")
+
+
 def _financial_year_token(financial_year: str) -> str:
     """Convert FY25-26 to FY2526 for readable output file names."""
     return financial_year.replace("-", "").replace(" ", "").upper()
@@ -268,21 +286,24 @@ def _convert_to_inr(amount: float, currency_code: str | None, exchange_rate: Any
     return normalized_amount
 
 
-def fetch_gold_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+def fetch_gold_mis_data(project_id: str | None = None, org_filter: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Query the required Gold MIS views from BigQuery."""
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
+    selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
 
     monthly_query = f"""
         SELECT *
         FROM {_table_name(resolved_project_id, MIS_MONTHLY_PL_VIEW)}
+        WHERE source_org_key = '{selected_org_key}'
         ORDER BY report_month
     """
     dashboard_query = f"""
         SELECT *
         FROM {_table_name(resolved_project_id, DASHBOARD_SUMMARY_VIEW)}
+        WHERE source_org_key = '{selected_org_key}'
     """
 
     monthly_pl_df = _query_to_dataframe(client, monthly_query)
@@ -295,7 +316,9 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
+    selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
+    org_filter_sql = "" if selected_org_key == "all" else f"WHERE source_org_key = '{selected_org_key}'"
 
     invoice_query = f"""
         WITH latest AS (
@@ -1031,6 +1054,8 @@ def get_mis_metrics(
 
     return {
         "Financial Year": financial_year,
+        "Organization": _first_value(dashboard_summary_df, "source_org_name", "All Organizations"),
+        "Reporting Currency": _first_value(dashboard_summary_df, "reporting_currency", "INR"),
         "Revenue": _format_currency(revenue_amount),
         "Expenses": _format_currency(expense_amount),
         "Profit": _format_currency(profit_amount),
@@ -1084,6 +1109,7 @@ def generate_mis_report(
     financial_year: str,
     output_dir: str | Path,
     project_id: str | None = None,
+    org_filter: str | None = None,
     monthly_pl_df: pd.DataFrame | None = None,
     dashboard_summary_df: pd.DataFrame | None = None,
     bills_df: pd.DataFrame | None = None,

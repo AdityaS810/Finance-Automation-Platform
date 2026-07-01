@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import os
+import re
 import uuid
 from datetime import datetime, timezone
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 
 import pandas as pd
 from dotenv import load_dotenv
@@ -14,6 +16,19 @@ from backend.gcp.gcs_loader import upload_json_to_gcs
 
 
 load_dotenv()
+
+MONEY_QUANTIZER = Decimal("0.01")
+BANK_MONEY_COLUMNS = ["debit", "credit", "balance", "balance_amount", "amount"]
+GSTR_MONEY_COLUMNS = [
+    "invoice_value",
+    "taxable_value",
+    "igst",
+    "cgst",
+    "sgst",
+    "cess",
+    "total_tax",
+    "total_amount",
+]
 
 
 def _require_environment_variables(variable_names: list[str]) -> tuple[str, str]:
@@ -30,6 +45,79 @@ def _get_optional_string_column(dataframe: pd.DataFrame, column_name: str, defau
     if column_name in dataframe.columns:
         return dataframe[column_name].fillna(default_value).astype(str)
     return pd.Series([default_value] * len(dataframe.index))
+
+
+def _to_money_decimal(value: object) -> Decimal:
+    """Convert a parsed currency value to a 2-decimal Decimal.
+
+    BigQuery NUMERIC rejects binary float artifacts such as
+    141.98999999999998. Decimal quantization keeps upload values currency-safe.
+    """
+    if value is None:
+        return Decimal("0.00")
+
+    try:
+        if pd.isna(value):
+            return Decimal("0.00")
+    except (TypeError, ValueError):
+        pass
+
+    text_value = str(value).strip()
+    if text_value.lower() in {"", "nan", "none", "nat"}:
+        return Decimal("0.00")
+
+    is_negative_parentheses = text_value.startswith("(") and text_value.endswith(")")
+    cleaned_value = text_value.strip("()")
+    cleaned_value = (
+        cleaned_value.replace("₹", "")
+        .replace(",", "")
+        .replace(" ", "")
+        .replace("\n", "")
+        .replace("\r", "")
+    )
+    cleaned_value = cleaned_value.replace("CR", "").replace("Cr", "").replace("cr", "")
+    cleaned_value = cleaned_value.replace("DR", "").replace("Dr", "").replace("dr", "")
+    cleaned_value = re.sub(r"[^0-9.\-]", "", cleaned_value)
+
+    try:
+        decimal_value = Decimal(cleaned_value)
+    except (InvalidOperation, ValueError):
+        decimal_value = Decimal("0.00")
+
+    if is_negative_parentheses:
+        decimal_value = -abs(decimal_value)
+
+    return decimal_value.quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
+
+
+def _money_string(value: object) -> str:
+    """Return a BigQuery NUMERIC-safe currency string with exactly 2 decimals."""
+    return format(_to_money_decimal(value), ".2f")
+
+
+def _money_column_names(dataframe: pd.DataFrame, explicit_columns: list[str]) -> list[str]:
+    """Find known currency columns and any parsed column ending in _amount."""
+    money_columns = set(explicit_columns)
+    money_columns.update(column for column in dataframe.columns if str(column).endswith("_amount"))
+    return [column for column in dataframe.columns if column in money_columns]
+
+
+def _clean_money_columns(dataframe: pd.DataFrame, explicit_columns: list[str]) -> pd.DataFrame:
+    """Return a copy where money columns are fixed 2-decimal strings."""
+    working_df = dataframe.copy()
+    for column_name in _money_column_names(working_df, explicit_columns):
+        working_df = working_df.astype({column_name: "object"})
+        working_df.loc[:, column_name] = working_df[column_name].apply(_money_string)
+    return working_df
+
+
+def _sum_money_values(row: pd.Series, column_names: list[str]) -> Decimal:
+    """Sum currency fields using Decimal so tax totals do not drift."""
+    total = Decimal("0.00")
+    for column_name in column_names:
+        if column_name in row.index:
+            total += _to_money_decimal(row[column_name])
+    return total.quantize(MONEY_QUANTIZER, rounding=ROUND_HALF_UP)
 
 
 def save_bank_statement_upload(
@@ -52,6 +140,8 @@ def save_bank_statement_upload(
 
     for column_name in ["debit", "credit", "balance"]:
         working_df[column_name] = pd.to_numeric(working_df[column_name], errors="coerce").fillna(0.0)
+
+    working_df = _clean_money_columns(working_df, BANK_MONEY_COLUMNS)
 
     upload_id = str(uuid.uuid4())
     uploaded_at = datetime.now(timezone.utc)
@@ -102,9 +192,9 @@ def save_bank_statement_upload(
                 "transaction_date": str(record["transaction_date"]),
                 "value_date": str(record["value_date"]),
                 "narration": str(record["narration"]),
-                "debit_amount": float(record["debit"]),
-                "credit_amount": float(record["credit"]),
-                "balance_amount": float(record["balance"]),
+                "debit_amount": _money_string(record["debit"]),
+                "credit_amount": _money_string(record["credit"]),
+                "balance_amount": _money_string(record["balance"]),
                 "reference_number": record["reference_number"],
                 "raw_row_number": int(record["raw_row_number"]),
                 "created_at": record["created_at"].isoformat(),
@@ -120,6 +210,10 @@ def save_bank_statement_upload(
         "status": "success",
         "message": "Bank statement uploaded successfully.",
         "upload_id": upload_id,
+        "file_name": original_file_name,
+        "uploaded_at": uploaded_at.isoformat(),
+        "source_type": "bank_statement",
+        "row_count": len(bank_rows),
         "records_parsed": len(bank_rows),
         "gcs_raw_path": full_gcs_path,
     }
@@ -163,8 +257,20 @@ def save_gstr_upload(
     )
     working_df["supplier_name"] = _get_optional_string_column(working_df, "supplier_name")
     working_df["supplier_gstin"] = working_df["gstin"].astype(str)
-    working_df["total_tax"] = working_df["igst"] + working_df["cgst"] + working_df["sgst"]
-    working_df["invoice_value"] = working_df["taxable_value"] + working_df["total_tax"]
+
+    if "cess" not in working_df.columns:
+        working_df["cess"] = "0.00"
+
+    working_df = _clean_money_columns(working_df, GSTR_MONEY_COLUMNS)
+    tax_columns = ["igst", "cgst", "sgst", "cess"]
+    working_df["total_tax"] = working_df.apply(
+        lambda row: _money_string(_sum_money_values(row, tax_columns)),
+        axis=1,
+    )
+    working_df["invoice_value"] = working_df.apply(
+        lambda row: _money_string(_to_money_decimal(row["taxable_value"]) + _to_money_decimal(row["total_tax"])),
+        axis=1,
+    )
     working_df["invoice_date"] = working_df["invoice_date"].dt.date
 
     records = working_df.to_dict(orient="records")
@@ -204,12 +310,12 @@ def save_gstr_upload(
                 "supplier_name": record["supplier_name"],
                 "invoice_number": str(record["invoice_number"]),
                 "invoice_date": str(record["invoice_date"]),
-                "taxable_value": float(record["taxable_value"]),
-                "igst_amount": float(record["igst"]),
-                "cgst_amount": float(record["cgst"]),
-                "sgst_amount": float(record["sgst"]),
-                "total_tax": float(record["total_tax"]),
-                "invoice_value": float(record["invoice_value"]),
+                "taxable_value": _money_string(record["taxable_value"]),
+                "igst_amount": _money_string(record["igst"]),
+                "cgst_amount": _money_string(record["cgst"]),
+                "sgst_amount": _money_string(record["sgst"]),
+                "total_tax": _money_string(record["total_tax"]),
+                "invoice_value": _money_string(record["invoice_value"]),
                 "created_at": record["created_at"].isoformat(),
             }
         )
@@ -223,6 +329,10 @@ def save_gstr_upload(
         "status": "success",
         "message": "GSTR file uploaded successfully.",
         "upload_id": upload_id,
+        "file_name": original_file_name,
+        "uploaded_at": uploaded_at.isoformat(),
+        "source_type": "gstr",
+        "row_count": len(gstr_rows),
         "records_parsed": len(gstr_rows),
         "gcs_raw_path": full_gcs_path,
     }

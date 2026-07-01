@@ -32,9 +32,14 @@ CREATE TABLE IF NOT EXISTS `finance_bronze.zoho_raw`
   source_system STRING NOT NULL,
   entity_name STRING NOT NULL,
   source_record_id STRING,
+  source_org_key STRING,
+  source_org_id STRING,
+  source_org_name STRING,
+  source_country STRING,
+  source_currency STRING,
   raw_json STRING NOT NULL,
   gcs_uri STRING,
   loaded_at TIMESTAMP NOT NULL
 )
 PARTITION BY DATE(loaded_at)
-CLUSTER BY entity_name, source_record_id, run_id;
+CLUSTER BY entity_name, source_org_key, source_record_id, run_id;

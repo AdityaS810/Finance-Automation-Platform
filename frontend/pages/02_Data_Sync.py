@@ -60,9 +60,18 @@ if sync_result:
         body_html=(
             f"<p>Completed at <strong>{sync_result['completed_at']:%d %b %Y, %I:%M %p}</strong></p>"
             f"<p>Duration <strong>{sync_result['duration']}</strong></p>"
+            "<p>US and India Zoho organizations are synced separately, then consolidated in INR for reporting.</p>"
         ),
     )
     st.success(sync_result["message"])
+    organization_columns = st.columns(len(sync_result.get("organizations", [])) or 1)
+    for index, organization in enumerate(sync_result.get("organizations", [])):
+        with organization_columns[index]:
+            st.metric(
+                organization["org_key"].upper(),
+                organization["base_currency"],
+                help=organization["organization_name"],
+            )
 elif sync_error:
     section_card(
         "Sync Not Completed",
@@ -82,8 +91,8 @@ else:
     )
 
 section_card(
-    "Row Counts",
-    body_html="<p>Latest available volume summary across core accounting tables.</p>",
+    "Row Counts by Organization",
+    body_html="<p>Latest available volume summary by Zoho organization and entity. Consolidated reporting uses INR values.</p>",
 )
 if sync_result:
     st.dataframe(sync_result["row_counts"], use_container_width=True, hide_index=True)
