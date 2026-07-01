@@ -18,7 +18,7 @@ from backend.ai.vertex_gemini_client import generate_vertex_text, is_vertex_gemi
 
 MAX_AI_ROWS = 20
 STRONG_BANK_MATCH_THRESHOLD = 0.78
-AI_UNAVAILABLE_MESSAGE = "Vertex AI insights unavailable. Showing rule-based reconciliation only."
+AI_UNAVAILABLE_MESSAGE = "Vertex AI insights unavailable. Showing fallback insights from rule-based reconciliation signals."
 AI_COLUMNS = ["ai_summary", "ai_recommendation", "ai_risk_level"]
 MIN_SUMMARY_WORDS = 12
 MAX_SUMMARY_WORDS = 35
@@ -185,6 +185,7 @@ def _bank_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
     status_label = f"status {status}" if status else "bank exception"
     bank_amount = _numeric_value(_row_value(row, "bank_amount"))
     accounting_amount = _numeric_value(_row_value(row, "accounting_amount"))
+    signal_text = _bank_signal_text(amount_difference, date_difference)
 
     if status == "bank_not_in_books" or "no accounting" in reason_lower or status == "unmatched":
         amount_text = f" for {bank_amount:.2f}" if bank_amount is not None else ""
@@ -196,6 +197,14 @@ def _bank_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
         return (
             f"{status_label} accounting entry{amount_text} has no bank line; check if it belongs to another period or account."
         )
+    if status == "possible_match":
+        if amount_difference is not None and amount_difference > 0 and date_difference is not None and date_difference > 0:
+            return f"{status_label} has {signal_text} with weak narration, party, or reference support."
+        if amount_difference is not None and amount_difference > 0:
+            return f"{status_label} has {signal_text}; verify whether charges, TDS, or grouping explain the gap."
+        if date_difference is not None and date_difference > 0:
+            return f"{status_label} has {signal_text}; verify clearing timing before approving the match."
+        return f"{status_label} has reviewable amount/date signals but weak narration, party, or reference support."
     if amount_difference is not None and amount_difference > 0 and "weak" in reason_lower:
         return (
             f"{status_label} shows amount difference {amount_difference:.2f} with weak narration, party, or reference similarity."
@@ -206,8 +215,6 @@ def _bank_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
         return f"{status_label} has a {date_difference} day date gap; verify whether this is timing or the wrong voucher."
     if "weak" in reason_lower or "similarity" in reason_lower:
         return f"{status_label} has weak narration, party, or reference similarity despite partial amount/date signals."
-    if status == "possible_match":
-        return f"{status_label} has reviewable amount/date signals but weak narration, party, or reference support."
     return f"{status_label} needs review because bank amount, date, narration, party, or reference signals are incomplete."
 
 
@@ -217,20 +224,23 @@ def _bank_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str
     status = _row_text(row, "match_status").lower()
     amount_difference = _amount_difference_from_reason(reason_lower) or _bank_amount_difference(row)
     date_difference = _date_difference_from_reason(reason_lower) or _bank_date_difference(row)
+    context = _bank_recommendation_context(row, amount_difference, date_difference)
 
     if status == "bank_not_in_books" or "no accounting" in reason_lower or status == "unmatched":
-        return "Create missing Zoho payment or expense entry if the bank debit or receipt is genuine."
+        return f"Create missing Zoho payment or expense entry if genuine; use {context}."
     if status == "books_not_in_bank":
-        return "Check whether this accounting entry cleared in another bank account, period, or grouped settlement."
+        return f"Check another bank account, period, or grouped settlement using {context}."
     if "salary" in reason_lower or "tax" in reason_lower or "charge" in reason_lower or "transfer" in reason_lower:
-        return "Check whether this is salary, tax, bank charge, or internal transfer before posting."
+        return f"Check salary, tax, bank charge, or transfer treatment using {context}."
+    if status == "possible_match":
+        return f"Verify voucher against {context}; approve only if party or reference matches."
     if "weak" in reason_lower or "similarity" in reason_lower:
-        return "Verify bank narration against Zoho voucher and approve only if party or reference matches."
+        return f"Verify bank narration against Zoho voucher using {context}."
     if date_difference and date_difference > 0:
-        return "Confirm whether the date gap is normal clearing timing or a duplicate/wrong voucher."
+        return f"Confirm whether {context} is clearing timing or wrong voucher."
     if amount_difference and amount_difference > 0:
-        return "Compare bank amount with voucher total, bank charges, TDS, or grouped settlement lines."
-    return "Review party, reference, voucher, and bank narration before final approval."
+        return f"Compare {context} with bank charges, TDS, or grouped settlement lines."
+    return f"Review party, reference, voucher, and bank narration using {context}."
 
 
 def _gst_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
@@ -618,6 +628,44 @@ def _bank_date_difference(row: pd.Series | dict[str, Any] | None) -> int | None:
     return abs((bank_date.date() - accounting_date.date()).days)
 
 
+def _bank_signal_text(amount_difference: float | None, date_difference: int | None) -> str:
+    """Describe available bank amount/date signals for short summaries."""
+    signals = []
+    if amount_difference is not None and amount_difference > 0:
+        signals.append(f"amount gap {amount_difference:.2f}")
+    if date_difference is not None and date_difference > 0:
+        signals.append(f"date gap {date_difference} day(s)")
+    if signals:
+        return " and ".join(signals)
+    return "amount/date signal"
+
+
+def _bank_recommendation_context(
+    row: pd.Series | dict[str, Any] | None,
+    amount_difference: float | None,
+    date_difference: int | None,
+) -> str:
+    """Build concise amount/date context for bank recommendations."""
+    bank_amount = _numeric_value(_row_value(row, "bank_amount"))
+    accounting_amount = _numeric_value(_row_value(row, "accounting_amount"))
+    bank_date = _row_text(row, "bank_date")
+    accounting_date = _row_text(row, "accounting_date")
+    parts = []
+    if bank_amount is not None:
+        parts.append(f"bank amount {bank_amount:.2f}")
+    if accounting_amount is not None:
+        parts.append(f"books amount {accounting_amount:.2f}")
+    if amount_difference is not None and amount_difference > 0:
+        parts.append(f"amount gap {amount_difference:.2f}")
+    if bank_date:
+        parts.append(f"bank date {bank_date}")
+    if accounting_date:
+        parts.append(f"books date {accounting_date}")
+    if date_difference is not None and date_difference > 0:
+        parts.append(f"date gap {date_difference} day(s)")
+    return ", ".join(parts[:4]) if parts else "available amount/date signals"
+
+
 def _gst_tax_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
     """Compute total GST tax difference if both values are present."""
     gstr_tax = _numeric_value(_row_value(row, "tax_amount_gstr"))
@@ -665,6 +713,8 @@ def _risk_level_from_row(row: pd.Series | dict[str, Any] | None, reconciliation_
     """Set risk from deterministic exception size and type."""
     reason_lower = _row_text(row, "match_reason").lower()
     status = _row_text(row, "match_status").lower()
+    if status in {"bank_not_in_books", "books_not_in_bank"}:
+        return "high"
     if "missing" in status or "missing" in reason_lower or "no accounting" in reason_lower:
         return "high"
 

@@ -152,16 +152,47 @@ def _download_excel_button(label: str, export_path: Path) -> None:
 def _show_ai_status(result: dict) -> None:
     """Show whether optional Vertex AI exception notes were added."""
     ai_status = result.get("ai_status", "unavailable")
-    ai_message = result.get("ai_message", "Vertex AI insights unavailable. Showing rule-based reconciliation only.")
+    ai_message = result.get("ai_message", "Vertex AI insights unavailable. Showing fallback insights from rule-based reconciliation signals.")
 
     if ai_status == "enabled":
         st.success(f"Vertex AI insights enabled. {ai_message}")
     elif ai_status == "not_required":
         st.info(ai_message)
     elif ai_status == "skipped":
-        st.info(ai_message)
+        st.info(f"{ai_message} Fallback insights are displayed in the review tables.")
     else:
-        st.warning(ai_message)
+        st.warning(f"{ai_message} Fallback insights are displayed in the review tables.")
+
+
+def _show_ai_summary_card(result: dict, results_df: pd.DataFrame, title: str) -> None:
+    """Render a top-level summary of generated or fallback review notes."""
+    section_card(
+        "AI Review Summary",
+        body_html="<p>High-level exception guidance before reviewing row-level notes.</p>",
+    )
+    if results_df.empty or "ai_risk_level" not in results_df.columns:
+        _show_ai_status(result)
+        st.caption(f"{title}: no insight rows are available yet.")
+        return
+
+    risk_values = results_df["ai_risk_level"].fillna("").astype(str).str.lower()
+    insight_rows = int(results_df.get("ai_summary", pd.Series("", index=results_df.index)).fillna("").astype(str).str.strip().ne("").sum())
+    high_count = int((risk_values == "high").sum())
+    medium_count = int((risk_values == "medium").sum())
+    low_count = int((risk_values == "low").sum())
+    ai_status = result.get("ai_status", "unavailable")
+    ai_message = result.get("ai_message", "Vertex AI insights unavailable. Showing fallback insights from rule-based reconciliation signals.")
+    summary_text = (
+        f"{title}: {insight_rows} review note(s), with {high_count} high-risk, "
+        f"{medium_count} medium-risk, and {low_count} low-risk row(s)."
+    )
+
+    if ai_status == "enabled":
+        st.success(f"{summary_text} {ai_message}")
+    elif ai_status == "not_required":
+        st.info(f"{summary_text} {ai_message}")
+    else:
+        st.warning(f"{summary_text} {ai_message} Fallback insights are displayed in the review tables.")
 
 
 def _ai_preview_dataframe(results_df):
@@ -454,7 +485,7 @@ with bank_tab:
             body_html="<p>Review rule-based match signals and optional Vertex AI notes before opening the full bank detail.</p>",
         )
         st.caption(bank_result["message"])
-        _show_ai_status(bank_result)
+        _show_ai_summary_card(bank_result, transaction_results, "Bank reconciliation")
         st.dataframe(_ai_preview_dataframe(transaction_results), use_container_width=True, hide_index=True)
 
         section_card(
@@ -584,7 +615,7 @@ with gst_tab:
             metric_card("Missing in books", str(gst_summary["missing_in_books"]), caption="Upload not in books", status="Error", icon="MB")
 
         st.caption(gst_result["message"])
-        _show_ai_status(gst_result)
+        _show_ai_summary_card(gst_result, gst_result["results"], "GST reconciliation")
 
         (
             summary_tab,

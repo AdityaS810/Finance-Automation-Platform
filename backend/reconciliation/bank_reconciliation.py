@@ -572,7 +572,7 @@ def run_bank_reconciliation(
             ai_metadata = {
                 "ai_status": "unavailable",
                 "ai_enabled": False,
-                "ai_message": "Vertex AI insights unavailable. Showing rule-based reconciliation only.",
+                "ai_message": "Vertex AI insights unavailable. Showing fallback insights from rule-based reconciliation signals.",
                 "ai_rows_processed": 0,
                 "ai_max_rows": max_ai_rows,
             }
@@ -581,7 +581,7 @@ def run_bank_reconciliation(
         ai_metadata = {
             "ai_status": "skipped",
             "ai_enabled": False,
-            "ai_message": "Vertex AI insights skipped. Showing rule-based reconciliation only.",
+            "ai_message": "Vertex AI insights skipped. Showing fallback insights from rule-based reconciliation signals.",
             "ai_rows_processed": 0,
             "ai_max_rows": 0,
         }

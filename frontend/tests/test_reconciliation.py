@@ -1001,8 +1001,8 @@ def test_ai_response_parser_has_clean_fallback_for_bad_json():
     )
     parsed = _parse_ai_response('```json {"ai_summary": "Bank", "ai_recommendation": "Review", "ai_risk_level": "low"} ```', row, "bank")
 
-    assert parsed["ai_summary"] == "Status possible_match shows amount difference 3764.00 with weak narration, party, or reference similarity."
-    assert parsed["ai_recommendation"] == "Verify bank narration against Zoho voucher and approve only if party or reference matches."
+    assert parsed["ai_summary"] == "Status possible_match has amount gap 3764.00; verify whether charges, TDS, or grouping explain the gap."
+    assert parsed["ai_recommendation"] == "Verify voucher against amount gap 3764.00; approve only if party or reference matches."
     assert parsed["ai_risk_level"] == "high"
     assert _word_count(parsed["ai_summary"]) >= 8
     assert "```" not in parsed["ai_summary"]
