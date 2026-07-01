@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 from backend.zoho.extract_zoho import (
     fetch_accounts,
     fetch_contacts,
+    fetch_expenses,
     fetch_invoices,
     fetch_journals,
 )
@@ -47,6 +48,12 @@ def main():
             "fetch_func": fetch_invoices,
             "bq_table": "zoho_invoices_raw",
             "id_field": "invoice_id",
+        },
+        {
+            "name": "expenses",
+            "fetch_func": fetch_expenses,
+            "bq_table": "zoho_expenses_raw",
+            "id_field": "expense_id",
         },
         {
             "name": "transactions",
