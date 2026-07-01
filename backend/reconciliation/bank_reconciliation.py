@@ -26,6 +26,10 @@ AMOUNT_TOLERANCE = 1.0
 DATE_TOLERANCE_DAYS = 3
 MATCHED_THRESHOLD = 0.78
 POSSIBLE_MATCH_THRESHOLD = 0.50
+BANK_NOT_IN_BOOKS_REASON = "Bank statement transaction was not found in accounting records."
+BANK_NOT_IN_BOOKS_ACTION = "Check whether this bank transaction is recorded in Zoho/books or needs to be posted."
+BOOKS_NOT_IN_BANK_REASON = "Accounting-side transaction was not found in uploaded bank statement."
+BOOKS_NOT_IN_BANK_ACTION = "Check whether this transaction appears in another bank account, different date range, or is pending bank clearance."
 
 
 def fetch_bank_reconciliation_data(
@@ -187,7 +191,10 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
             match_status = "possible_match"
             used_accounting_indexes.add(best_index)
         else:
-            match_status = "unmatched"
+            match_status = "bank_not_in_books"
+            best_index = None
+            best_score = 0.0
+            best_reason = BANK_NOT_IN_BOOKS_REASON
 
         accounting_row = accounting_working_df.loc[best_index] if best_index is not None else pd.Series(dtype="object")
         result_rows.append(
@@ -200,11 +207,19 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
                 "accounting_date": accounting_row.get("accounting_date", ""),
                 "accounting_party_name": accounting_row.get("accounting_party_name", ""),
                 "accounting_amount": accounting_row.get("accounting_amount", None),
+                "transaction_type": accounting_row.get("transaction_type", ""),
+                "reference_number": accounting_row.get("reference_number", ""),
+                "transaction_number": accounting_row.get("transaction_number", ""),
                 "match_status": match_status,
                 "confidence_score": round(best_score, 2),
-                "match_reason": best_reason if best_index is not None else "No accounting-side match found.",
+                "match_reason": best_reason,
+                "action_required": _action_for_bank_status(match_status),
             }
         )
+
+    for accounting_index, accounting_row in accounting_working_df.iterrows():
+        if accounting_index not in used_accounting_indexes:
+            result_rows.append(_books_not_in_bank_result_row(accounting_row))
 
     return pd.DataFrame(result_rows)
 
@@ -314,10 +329,47 @@ def _opening_balance_result_row(bank_row: pd.Series) -> dict:
         "accounting_date": "",
         "accounting_party_name": "",
         "accounting_amount": None,
+        "transaction_type": "",
+        "reference_number": "",
+        "transaction_number": "",
         "match_status": "ignored_opening_balance",
         "confidence_score": 0.0,
         "match_reason": "Opening balance row ignored for transaction matching.",
+        "action_required": _action_for_bank_status("ignored_opening_balance"),
     }
+
+
+def _books_not_in_bank_result_row(accounting_row: pd.Series) -> dict:
+    """Build an accounting-side exception row that was not found in the bank upload."""
+    return {
+        "bank_line_id": "",
+        "bank_date": "",
+        "bank_narration": "",
+        "bank_amount": None,
+        "accounting_record_id": accounting_row.get("accounting_record_id", ""),
+        "accounting_date": accounting_row.get("accounting_date", ""),
+        "accounting_party_name": accounting_row.get("accounting_party_name", ""),
+        "accounting_amount": accounting_row.get("accounting_amount", None),
+        "transaction_type": accounting_row.get("transaction_type", ""),
+        "reference_number": accounting_row.get("reference_number", ""),
+        "transaction_number": accounting_row.get("transaction_number", ""),
+        "match_status": "books_not_in_bank",
+        "confidence_score": 0.0,
+        "match_reason": BOOKS_NOT_IN_BANK_REASON,
+        "action_required": BOOKS_NOT_IN_BANK_ACTION,
+    }
+
+
+def _action_for_bank_status(match_status: str) -> str:
+    """Return a finance-friendly action for each bank reconciliation status."""
+    actions = {
+        "matched": "No action required.",
+        "possible_match": "Review manually before confirming.",
+        "ignored_opening_balance": "Opening balance row ignored.",
+        "bank_not_in_books": BANK_NOT_IN_BOOKS_ACTION,
+        "books_not_in_bank": BOOKS_NOT_IN_BANK_ACTION,
+    }
+    return actions.get(match_status, "Review manually before confirming.")
 
 
 def _prepare_accounting_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
@@ -384,13 +436,17 @@ def _value_series(dataframe: pd.DataFrame, value: Any) -> pd.Series:
 def _summary(results: pd.DataFrame, uploaded_rows: int | None = None) -> dict:
     """Build Streamlit KPI counts from bank reconciliation results."""
     ignored_opening_balance = int((results["match_status"] == "ignored_opening_balance").sum())
+    bank_not_in_books = int((results["match_status"] == "bank_not_in_books").sum())
+    books_not_in_bank = int((results["match_status"] == "books_not_in_bank").sum())
     return {
         "uploaded_bank_rows": int(uploaded_rows if uploaded_rows is not None else len(results.index)),
         "total_records": int(len(results.index)),
         "transaction_records": int(len(results.index) - ignored_opening_balance),
         "matched": int((results["match_status"] == "matched").sum()),
         "possible_match": int((results["match_status"] == "possible_match").sum()),
-        "unmatched": int((results["match_status"] == "unmatched").sum()),
+        "bank_not_in_books": bank_not_in_books,
+        "books_not_in_bank": books_not_in_bank,
+        "unmatched": bank_not_in_books,
         "ignored_opening_balance": ignored_opening_balance,
         "matched_records": int((results["match_status"] == "matched").sum()),
     }

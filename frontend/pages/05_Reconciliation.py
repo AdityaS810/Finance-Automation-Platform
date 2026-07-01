@@ -311,6 +311,14 @@ def _split_ignored_opening_balances(results_df):
     return results_df[~ignored_mask], results_df[ignored_mask]
 
 
+def _bank_status_dataframe(results_df, status: str):
+    """Return bank reconciliation rows for one status."""
+    if "match_status" not in results_df.columns:
+        return results_df.copy()
+
+    return results_df[results_df["match_status"] == status].copy().reset_index(drop=True)
+
+
 def _friendly_timestamp(value) -> str:
     """Format BigQuery timestamps for upload selectors."""
     parsed_value = pd.to_datetime(value, errors="coerce")
@@ -420,7 +428,7 @@ with bank_tab:
             f"Reconciled upload: {selected_upload.get('file_name', '')} | "
             f"Uploaded: {_friendly_timestamp(selected_upload.get('uploaded_at'))}"
         )
-        summary_columns = st.columns(5)
+        summary_columns = st.columns(6)
         with summary_columns[0]:
             metric_card("Uploaded Rows", str(bank_summary["uploaded_bank_rows"]), caption="Selected bank file", status="Info", icon="UR")
         with summary_columns[1]:
@@ -428,8 +436,10 @@ with bank_tab:
         with summary_columns[2]:
             metric_card("Possible Match", str(bank_summary["possible_match"]), caption="Needs review", status="Warning", icon="PM")
         with summary_columns[3]:
-            metric_card("Unmatched", str(bank_summary["unmatched"]), caption="No candidate found", status="Error", icon="UM")
+            metric_card("Bank not in Books", str(bank_summary.get("bank_not_in_books", bank_summary["unmatched"])), caption="Bank only", status="Error", icon="BB")
         with summary_columns[4]:
+            metric_card("Books not in Bank", str(bank_summary.get("books_not_in_bank", 0)), caption="Books only", status="Error", icon="BK")
+        with summary_columns[5]:
             metric_card(
                 "Opening Balance",
                 str(bank_summary["ignored_opening_balance"]),
@@ -449,14 +459,32 @@ with bank_tab:
 
         section_card(
             "Bank Reconciliation Detail",
-            body_html="<p>Full transaction-level reconciliation output. Opening balance rows are kept separate from transaction matching.</p>",
+            body_html="<p>Review matched transactions and bank/books exceptions separately for faster finance follow-up.</p>",
         )
-        st.dataframe(transaction_results, use_container_width=True, hide_index=True)
-        if not opening_balance_results.empty:
-            section_card(
-                "Ignored Opening Balance Rows",
-                body_html="<p>Opening balance rows are shown for auditability but are not used for transaction matching.</p>",
-            )
+        (
+            bank_not_books_tab,
+            books_not_bank_tab,
+            bank_possible_tab,
+            bank_matched_tab,
+            opening_balance_tab,
+        ) = st.tabs(
+            [
+                "Bank not in Books",
+                "Books not in Bank",
+                "Possible Match",
+                "Matched",
+                "Opening Balance",
+            ]
+        )
+        with bank_not_books_tab:
+            st.dataframe(_bank_status_dataframe(bank_result["results"], "bank_not_in_books"), use_container_width=True, hide_index=True)
+        with books_not_bank_tab:
+            st.dataframe(_bank_status_dataframe(bank_result["results"], "books_not_in_bank"), use_container_width=True, hide_index=True)
+        with bank_possible_tab:
+            st.dataframe(_bank_status_dataframe(bank_result["results"], "possible_match"), use_container_width=True, hide_index=True)
+        with bank_matched_tab:
+            st.dataframe(_bank_status_dataframe(bank_result["results"], "matched"), use_container_width=True, hide_index=True)
+        with opening_balance_tab:
             st.dataframe(opening_balance_results, use_container_width=True, hide_index=True)
 
         export_path = Path(bank_result["export_path"])
