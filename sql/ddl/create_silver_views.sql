@@ -153,9 +153,30 @@ WITH parsed AS (
   SELECT
     run_id,
     loaded_at,
-    source_record_id AS journal_id,
-    JSON_VALUE(raw_json, '$.journal_number') AS journal_number,
-    JSON_VALUE(raw_json, '$.date') AS transaction_date,
+    source_record_id AS transaction_id,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.transaction_number'),
+      JSON_VALUE(raw_json, '$.entry_number'),
+      JSON_VALUE(raw_json, '$.journal_number')
+    ) AS transaction_number,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.transaction_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.journal_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.last_modified_time'), 1, 10) AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.created_time'), 1, 10) AS DATE)
+    ) AS transaction_date,
+    JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.bcy_total') AS NUMERIC)
+    ) AS transaction_amount,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.currency_code'),
+      JSON_VALUE(raw_json, '$.currency'),
+      JSON_VALUE(raw_json, '$.source_currency')
+    ) AS currency_code,
     JSON_VALUE(raw_json, '$.status') AS status,
     JSON_VALUE(raw_json, '$.notes') AS notes,
     raw_json
@@ -166,16 +187,19 @@ deduped AS (
   SELECT
     *,
     ROW_NUMBER() OVER (
-      PARTITION BY journal_id
+      PARTITION BY transaction_id
       ORDER BY loaded_at DESC
     ) AS row_num
   FROM parsed
 )
 
 SELECT
-  journal_id,
-  journal_number,
+  transaction_id,
+  transaction_number,
   transaction_date,
+  reference_number,
+  transaction_amount,
+  currency_code,
   status,
   notes,
   run_id,

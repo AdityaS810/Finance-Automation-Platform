@@ -636,14 +636,23 @@ WITH parsed AS (
     source_currency,
     source_record_id,
     source_record_id AS journal_id,
-    JSON_VALUE(raw_json, '$.journal_number') AS journal_number,
-    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS journal_date,
+    COALESCE(JSON_VALUE(raw_json, '$.journal_number'), JSON_VALUE(raw_json, '$.entry_number')) AS journal_number,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.journal_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.last_modified_time'), 1, 10) AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.created_time'), 1, 10) AS DATE)
+    ) AS journal_date,
     JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
     JSON_VALUE(raw_json, '$.status') AS status,
     JSON_VALUE(raw_json, '$.notes') AS notes,
     COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
     SAFE_CAST(JSON_VALUE(raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
-    COALESCE(SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC)) AS total_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.bcy_total') AS NUMERIC)
+    ) AS total_amount,
     loaded_at
   FROM `finance_bronze.zoho_raw`
   WHERE entity_name = 'journals'
@@ -654,6 +663,58 @@ SELECT
   total_amount AS original_amount,
   total_amount * COALESCE(fx.inr_rate, 1) AS amount_inr,
   total_amount * COALESCE(fx.inr_rate, 1) AS total_amount_inr
+FROM parsed
+LEFT JOIN `finance_silver.fx_rates_demo` fx
+  ON fx.currency_code = parsed.original_currency
+QUALIFY ROW_NUMBER() OVER (
+  PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
+  ORDER BY loaded_at DESC
+) = 1;
+
+
+CREATE OR REPLACE VIEW `finance_silver.fact_transactions` AS
+WITH parsed AS (
+  SELECT
+    run_id,
+    COALESCE(source_org_key, 'legacy') AS source_org_key,
+    source_org_id,
+    source_org_name,
+    source_country,
+    source_currency,
+    source_record_id,
+    source_record_id AS transaction_id,
+    COALESCE(
+      JSON_VALUE(raw_json, '$.transaction_number'),
+      JSON_VALUE(raw_json, '$.entry_number'),
+      JSON_VALUE(raw_json, '$.journal_number')
+    ) AS transaction_number,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.transaction_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.journal_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.last_modified_time'), 1, 10) AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw_json, '$.created_time'), 1, 10) AS DATE)
+    ) AS transaction_date,
+    JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    JSON_VALUE(raw_json, '$.notes') AS notes,
+    COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw_json, '$.bcy_total') AS NUMERIC)
+    ) AS transaction_amount,
+    raw_json,
+    loaded_at
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'transactions'
+)
+SELECT
+  parsed.*,
+  original_currency AS currency_code,
+  transaction_amount AS original_amount,
+  transaction_amount * COALESCE(fx.inr_rate, 1) AS amount_inr
 FROM parsed
 LEFT JOIN `finance_silver.fx_rates_demo` fx
   ON fx.currency_code = parsed.original_currency
@@ -945,14 +1006,23 @@ WITH parsed AS (
     raw.source_currency,
     raw.source_record_id,
     raw.source_record_id AS journal_id,
-    JSON_VALUE(raw.raw_json, '$.journal_number') AS journal_number,
-    SAFE_CAST(JSON_VALUE(raw.raw_json, '$.date') AS DATE) AS journal_date,
+    COALESCE(JSON_VALUE(raw.raw_json, '$.journal_number'), JSON_VALUE(raw.raw_json, '$.entry_number')) AS journal_number,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw.raw_json, '$.journal_date') AS DATE),
+      SAFE_CAST(JSON_VALUE(raw.raw_json, '$.date') AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw.raw_json, '$.last_modified_time'), 1, 10) AS DATE),
+      SAFE_CAST(SUBSTR(JSON_VALUE(raw.raw_json, '$.created_time'), 1, 10) AS DATE)
+    ) AS journal_date,
     JSON_VALUE(raw.raw_json, '$.reference_number') AS reference_number,
     JSON_VALUE(raw.raw_json, '$.status') AS status,
     JSON_VALUE(raw.raw_json, '$.notes') AS notes,
     COALESCE(JSON_VALUE(raw.raw_json, '$.currency_code'), raw.source_currency, 'INR') AS original_currency,
     SAFE_CAST(JSON_VALUE(raw.raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
-    COALESCE(SAFE_CAST(JSON_VALUE(raw.raw_json, '$.total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.amount') AS NUMERIC)) AS total_amount,
+    COALESCE(
+      SAFE_CAST(JSON_VALUE(raw.raw_json, '$.total') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw.raw_json, '$.amount') AS NUMERIC),
+      SAFE_CAST(JSON_VALUE(raw.raw_json, '$.bcy_total') AS NUMERIC)
+    ) AS total_amount,
     raw.loaded_at
   FROM `finance_bronze.zoho_raw` raw
   WHERE raw.entity_name = 'journals'
@@ -1171,10 +1241,73 @@ SELECT
 FROM `finance_silver.fact_customer_payments`
 UNION ALL
 SELECT
-  'journal', 'journal_adjustment', journal_id, journal_number, journal_date, CAST(NULL AS STRING), CAST(NULL AS STRING), reference_number, CAST(NULL AS STRING),
+  'journal', 'journal_adjustment', journal_id, journal_number, journal_date, CAST(NULL AS STRING), notes, COALESCE(reference_number, journal_number, notes), CAST(NULL AS STRING),
   currency_code, original_currency, original_amount, amount_inr, amount_inr, CAST(NULL AS NUMERIC), status,
   source_org_key, source_org_id, source_org_name, run_id, source_record_id, loaded_at
-FROM `finance_silver.fact_journals`;
+FROM `finance_silver.fact_journals`
+WHERE journal_date IS NOT NULL
+  AND amount_inr IS NOT NULL
+  AND amount_inr != 0
+  AND REGEXP_CONTAINS(
+    UPPER(CONCAT(
+      COALESCE(notes, ''),
+      ' ',
+      COALESCE(reference_number, ''),
+      ' ',
+      COALESCE(journal_number, '')
+    )),
+    r'(^|[^A-Z0-9])(BANK|HSBC|CASH|PAYMENT|PAID|RECEIPT|RECEIVED|TRANSFER|NEFT|RTGS|IMPS|UPI|ACH|SALARY|TDS|GST|TAX|CHARGES|DC|CR)([^A-Z0-9]|$)'
+  )
+UNION ALL
+SELECT
+  'expense',
+  'expense_payment',
+  expense_id,
+  expense_number,
+  expense_date,
+  vendor_id,
+  vendor_name,
+  expense_number,
+  CAST(NULL AS STRING),
+  currency_code,
+  original_currency,
+  original_amount,
+  -ABS(amount_inr),
+  -ABS(amount_inr),
+  CAST(0 AS NUMERIC),
+  status,
+  source_org_key,
+  source_org_id,
+  source_org_name,
+  run_id,
+  source_record_id,
+  loaded_at
+FROM `finance_silver.fact_expenses`
+UNION ALL
+SELECT
+  'transaction',
+  'bank_transaction_or_journal',
+  transaction_id,
+  transaction_number,
+  transaction_date,
+  CAST(NULL AS STRING),
+  CAST(NULL AS STRING),
+  reference_number,
+  CAST(NULL AS STRING),
+  currency_code,
+  original_currency,
+  original_amount,
+  transaction_amount,
+  transaction_amount,
+  CAST(NULL AS NUMERIC),
+  status,
+  source_org_key,
+  source_org_id,
+  source_org_name,
+  run_id,
+  source_record_id,
+  loaded_at
+FROM `finance_silver.fact_transactions`;
 
 
 CREATE OR REPLACE VIEW `finance_gold.gst_reconciliation_input` AS
