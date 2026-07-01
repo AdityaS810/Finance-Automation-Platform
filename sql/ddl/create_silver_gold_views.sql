@@ -18,40 +18,91 @@ SELECT 'USD' AS currency_code, CAST(83.00 AS NUMERIC) AS inr_rate;
 
 -- ============================================================
 -- Silver Layer
--- Bronze is append-only. Silver latest views keep the current structured
--- record per organization and source_record_id.
+-- Bronze is append-only. Silver history views keep SCD2 versions, and latest
+-- dimension views expose the current structured record per organization and
+-- source_record_id.
 -- ============================================================
 
-CREATE OR REPLACE VIEW `finance_silver.dim_accounts` AS
+CREATE OR REPLACE VIEW `finance_silver.dim_accounts_history` AS
+WITH parsed AS (
+  SELECT
+    run_id,
+    COALESCE(source_org_key, 'legacy') AS source_org_key,
+    source_org_id,
+    source_org_name,
+    source_country,
+    source_currency,
+    source_record_id,
+    source_record_id AS account_id,
+    JSON_VALUE(raw_json, '$.account_name') AS account_name,
+    JSON_VALUE(raw_json, '$.account_code') AS account_code,
+    JSON_VALUE(raw_json, '$.account_type') AS account_type,
+    JSON_VALUE(raw_json, '$.account_type_formatted') AS account_type_label,
+    JSON_VALUE(raw_json, '$.description') AS description,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.is_active') AS BOOL) AS is_active,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
+    CAST(NULL AS NUMERIC) AS original_amount,
+    CAST(NULL AS NUMERIC) AS amount_inr,
+    loaded_at
+  FROM `finance_bronze.zoho_raw`
+  WHERE entity_name = 'accounts'
+),
+hashed AS (
+  SELECT
+    parsed.*,
+    TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+      account_name,
+      account_code,
+      account_type,
+      account_type_label,
+      description,
+      is_active,
+      status,
+      original_currency
+    )))) AS change_hash
+  FROM parsed
+),
+changed AS (
+  SELECT
+    hashed.*
+  FROM hashed
+  QUALIFY LAG(change_hash) OVER (
+    PARTITION BY COALESCE(source_org_id, 'legacy'), account_id
+    ORDER BY loaded_at
+  ) IS NULL
+    OR LAG(change_hash) OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), account_id
+      ORDER BY loaded_at
+    ) != change_hash
+),
+versioned AS (
+  SELECT
+    changed.*,
+    loaded_at AS valid_from,
+    TIMESTAMP_SUB(
+      LEAD(loaded_at) OVER (
+        PARTITION BY COALESCE(source_org_id, 'legacy'), account_id
+        ORDER BY loaded_at
+      ),
+      INTERVAL 1 MICROSECOND
+    ) AS valid_to,
+    ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), account_id
+      ORDER BY loaded_at
+    ) AS version_number,
+    ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), account_id
+      ORDER BY loaded_at DESC
+    ) = 1 AS is_current
+  FROM changed
+)
 SELECT
-  run_id,
-  COALESCE(source_org_key, 'legacy') AS source_org_key,
-  source_org_id,
-  source_org_name,
-  source_country,
-  source_currency,
-  source_record_id,
-  source_record_id AS account_id,
-  JSON_VALUE(raw_json, '$.account_name') AS account_name,
-  JSON_VALUE(raw_json, '$.account_code') AS account_code,
-  JSON_VALUE(raw_json, '$.account_type') AS account_type,
-  JSON_VALUE(raw_json, '$.account_type_formatted') AS account_type_label,
-  JSON_VALUE(raw_json, '$.description') AS description,
-  SAFE_CAST(JSON_VALUE(raw_json, '$.is_active') AS BOOL) AS is_active,
-  JSON_VALUE(raw_json, '$.status') AS status,
-  COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
-  CAST(NULL AS NUMERIC) AS original_amount,
-  CAST(NULL AS NUMERIC) AS amount_inr,
-  loaded_at
-FROM `finance_bronze.zoho_raw`
-WHERE entity_name = 'accounts'
-QUALIFY ROW_NUMBER() OVER (
-  PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
-  ORDER BY loaded_at DESC
-) = 1;
+  *
+FROM versioned;
 
 
-CREATE OR REPLACE VIEW `finance_silver.dim_contacts` AS
+CREATE OR REPLACE VIEW `finance_silver.dim_contacts_history` AS
 WITH parsed AS (
   SELECT
     run_id,
@@ -78,21 +129,88 @@ WITH parsed AS (
     loaded_at
   FROM `finance_bronze.zoho_raw`
   WHERE entity_name = 'contacts'
+),
+converted AS (
+  SELECT
+    parsed.*,
+    original_currency AS currency_code,
+    CAST(NULL AS NUMERIC) AS original_amount,
+    CAST(NULL AS NUMERIC) AS amount_inr,
+    outstanding_receivable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_receivable_amount_inr,
+    outstanding_payable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_payable_amount_inr
+  FROM parsed
+  LEFT JOIN `finance_silver.fx_rates_demo` fx
+    ON fx.currency_code = parsed.original_currency
+),
+hashed AS (
+  SELECT
+    converted.*,
+    TO_HEX(SHA256(TO_JSON_STRING(STRUCT(
+      contact_name,
+      company_name,
+      contact_type,
+      email,
+      phone,
+      mobile,
+      status,
+      gstin,
+      gst_treatment,
+      place_of_contact,
+      original_currency
+    )))) AS change_hash
+  FROM converted
+),
+changed AS (
+  SELECT
+    hashed.*
+  FROM hashed
+  QUALIFY LAG(change_hash) OVER (
+    PARTITION BY COALESCE(source_org_id, 'legacy'), contact_id
+    ORDER BY loaded_at
+  ) IS NULL
+    OR LAG(change_hash) OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), contact_id
+      ORDER BY loaded_at
+    ) != change_hash
+),
+versioned AS (
+  SELECT
+    changed.*,
+    loaded_at AS valid_from,
+    TIMESTAMP_SUB(
+      LEAD(loaded_at) OVER (
+        PARTITION BY COALESCE(source_org_id, 'legacy'), contact_id
+        ORDER BY loaded_at
+      ),
+      INTERVAL 1 MICROSECOND
+    ) AS valid_to,
+    ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), contact_id
+      ORDER BY loaded_at
+    ) AS version_number,
+    ROW_NUMBER() OVER (
+      PARTITION BY COALESCE(source_org_id, 'legacy'), contact_id
+      ORDER BY loaded_at DESC
+    ) = 1 AS is_current
+  FROM changed
 )
 SELECT
-  parsed.*,
-  original_currency AS currency_code,
-  CAST(NULL AS NUMERIC) AS original_amount,
-  CAST(NULL AS NUMERIC) AS amount_inr,
-  outstanding_receivable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_receivable_amount_inr,
-  outstanding_payable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_payable_amount_inr
-FROM parsed
-LEFT JOIN `finance_silver.fx_rates_demo` fx
-  ON fx.currency_code = parsed.original_currency
-QUALIFY ROW_NUMBER() OVER (
-  PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
-  ORDER BY loaded_at DESC
-) = 1;
+  *
+FROM versioned;
+
+
+CREATE OR REPLACE VIEW `finance_silver.dim_accounts` AS
+SELECT
+  * EXCEPT(change_hash, valid_from, valid_to, version_number, is_current)
+FROM `finance_silver.dim_accounts_history`
+WHERE is_current = TRUE;
+
+
+CREATE OR REPLACE VIEW `finance_silver.dim_contacts` AS
+SELECT
+  * EXCEPT(change_hash, valid_from, valid_to, version_number, is_current)
+FROM `finance_silver.dim_contacts_history`
+WHERE is_current = TRUE;
 
 
 CREATE OR REPLACE VIEW `finance_silver.fact_invoices` AS
@@ -586,98 +704,6 @@ QUALIFY ROW_NUMBER() OVER (
   PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
   ORDER BY loaded_at DESC
 ) = 1;
-
-
--- ============================================================
--- Silver History Views
--- History views keep every cleaned version and mark the current row.
--- ============================================================
-
-CREATE OR REPLACE VIEW `finance_silver.dim_accounts_history` AS
-WITH versioned AS (
-  SELECT
-    latest.*,
-    ROW_NUMBER() OVER (
-      PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
-      ORDER BY loaded_at DESC
-    ) AS version_number
-  FROM (
-    SELECT
-      run_id,
-      COALESCE(source_org_key, 'legacy') AS source_org_key,
-      source_org_id,
-      source_org_name,
-      source_country,
-      source_currency,
-      source_record_id,
-      source_record_id AS account_id,
-      JSON_VALUE(raw_json, '$.account_name') AS account_name,
-      JSON_VALUE(raw_json, '$.account_code') AS account_code,
-      JSON_VALUE(raw_json, '$.account_type') AS account_type,
-      JSON_VALUE(raw_json, '$.account_type_formatted') AS account_type_label,
-      JSON_VALUE(raw_json, '$.description') AS description,
-      SAFE_CAST(JSON_VALUE(raw_json, '$.is_active') AS BOOL) AS is_active,
-      JSON_VALUE(raw_json, '$.status') AS status,
-      COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
-      CAST(NULL AS NUMERIC) AS original_amount,
-      CAST(NULL AS NUMERIC) AS amount_inr,
-      loaded_at
-    FROM `finance_bronze.zoho_raw`
-    WHERE entity_name = 'accounts'
-  ) latest
-)
-SELECT *, version_number = 1 AS is_current
-FROM versioned;
-
-
-CREATE OR REPLACE VIEW `finance_silver.dim_contacts_history` AS
-WITH parsed AS (
-  SELECT
-    run_id,
-    COALESCE(source_org_key, 'legacy') AS source_org_key,
-    source_org_id,
-    source_org_name,
-    source_country,
-    source_currency,
-    source_record_id,
-    source_record_id AS contact_id,
-    JSON_VALUE(raw_json, '$.contact_name') AS contact_name,
-    JSON_VALUE(raw_json, '$.company_name') AS company_name,
-    JSON_VALUE(raw_json, '$.contact_type') AS contact_type,
-    JSON_VALUE(raw_json, '$.email') AS email,
-    JSON_VALUE(raw_json, '$.phone') AS phone,
-    JSON_VALUE(raw_json, '$.mobile') AS mobile,
-    JSON_VALUE(raw_json, '$.status') AS status,
-    JSON_VALUE(raw_json, '$.gst_no') AS gstin,
-    JSON_VALUE(raw_json, '$.gst_treatment') AS gst_treatment,
-    JSON_VALUE(raw_json, '$.place_of_contact') AS place_of_contact,
-    COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
-    SAFE_CAST(JSON_VALUE(raw_json, '$.outstanding_receivable_amount') AS NUMERIC) AS outstanding_receivable_amount,
-    SAFE_CAST(JSON_VALUE(raw_json, '$.outstanding_payable_amount') AS NUMERIC) AS outstanding_payable_amount,
-    loaded_at
-  FROM `finance_bronze.zoho_raw`
-  WHERE entity_name = 'contacts'
-),
-converted AS (
-  SELECT
-    parsed.*,
-    original_currency AS currency_code,
-    CAST(NULL AS NUMERIC) AS original_amount,
-    CAST(NULL AS NUMERIC) AS amount_inr,
-    outstanding_receivable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_receivable_amount_inr,
-    outstanding_payable_amount * COALESCE(fx.inr_rate, 1) AS outstanding_payable_amount_inr
-  FROM parsed
-  LEFT JOIN `finance_silver.fx_rates_demo` fx
-    ON fx.currency_code = parsed.original_currency
-),
-versioned AS (
-  SELECT
-    converted.*,
-    ROW_NUMBER() OVER (PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id ORDER BY loaded_at DESC) AS version_number
-  FROM converted
-)
-SELECT *, version_number = 1 AS is_current
-FROM versioned;
 
 
 CREATE OR REPLACE VIEW `finance_silver.fact_invoices_history` AS
