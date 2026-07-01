@@ -7,7 +7,7 @@ import pytest
 
 from backend.ai.reconciliation_insights import _parse_ai_response
 from backend.reconciliation.bank_reconciliation import run_bank_reconciliation
-from backend.reconciliation.gst_reconciliation import run_gst_reconciliation
+from backend.reconciliation.gst_reconciliation import reconcile_gst_data, run_gst_reconciliation
 
 
 def _word_count(text: str) -> int:
@@ -363,22 +363,28 @@ def _single_books_row(
     party_name: str = "Alpha Supplier",
     taxable_value: float = 1000,
     igst_amount: float = 180,
+    cgst_amount: float = 0,
+    sgst_amount: float = 0,
+    raw_invoice_value: float | None = None,
+    source_type: str = "bill",
 ) -> pd.DataFrame:
-    total_tax = igst_amount
+    total_tax = igst_amount + cgst_amount + sgst_amount
+    invoice_value = taxable_value + total_tax if raw_invoice_value is None else raw_invoice_value
     return pd.DataFrame(
         [
             {
-                "books_record_id": "book-single",
+                "books_record_id": f"book-{source_type}-{invoice_number}",
+                "books_source_type": source_type,
                 "party_name": party_name,
                 "gstin": gstin,
                 "invoice_number": invoice_number,
                 "books_invoice_date": invoice_date,
                 "books_taxable_value": taxable_value,
                 "books_igst_amount": igst_amount,
-                "books_cgst_amount": 0,
-                "books_sgst_amount": 0,
+                "books_cgst_amount": cgst_amount,
+                "books_sgst_amount": sgst_amount,
                 "books_tax_amount": total_tax,
-                "books_invoice_value": taxable_value + total_tax,
+                "books_invoice_value": invoice_value,
             },
         ]
     )
@@ -419,6 +425,7 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
 
     assert result["summary"]["matched"] == 3
     assert result["summary"]["uploaded_gstr_rows"] == 7
+    assert result["summary"]["tax_component_mismatch"] == 0
     assert result["summary"]["amount_mismatch"] == 1
     assert result["summary"]["possible_match"] == 1
     assert result["summary"]["missing_in_books"] == 1
@@ -512,7 +519,9 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
     assert possible_row["difference_amount"] == possible_row["amount_difference"]
     assert "Confirm manually before marking as matched" in possible_row["action_required"]
     review_rows = result["results"][
-        result["results"]["match_status"].isin(["amount_mismatch", "possible_match", "missing_in_books", "missing_in_gstr"])
+        result["results"]["match_status"].isin(
+            ["tax_component_mismatch", "amount_mismatch", "possible_match", "missing_in_books", "missing_in_gstr"]
+        )
     ]
     assert review_rows["ai_summary"].map(_word_count).ge(8).all()
     assert result["ai_status"] in {"enabled", "unavailable", "not_required"}
@@ -521,6 +530,7 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
     workbook = pd.ExcelFile(result["export_path"])
     assert {
         "Summary",
+        "Tax Type Mismatches",
         "Amount Mismatches",
         "Missing in Books",
         "Missing in GSTR",
@@ -528,6 +538,34 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
         "Matched",
         "Technical Audit",
     }.issubset(set(workbook.sheet_names))
+    summary_sheet = pd.read_excel(workbook, sheet_name="Summary")
+    assert summary_sheet.columns.tolist() == ["Metric", "Value", "Explanation"]
+    assert summary_sheet["Metric"].tolist() == [
+        "Selected GSTR file",
+        "Reconciliation period",
+        "Uploaded GSTR rows",
+        "Exact matched",
+        "Tax type mismatch",
+        "Amount mismatch",
+        "Possible match",
+        "Missing in GSTR",
+        "Missing in Books",
+    ]
+    assert "Books bill not found in uploaded GSTR" in set(summary_sheet["Explanation"].dropna())
+    assert "GSTR invoice not found in Zoho/books" in set(summary_sheet["Explanation"].dropna())
+    assert "Total matches but IGST/CGST/SGST breakup differs" in set(summary_sheet["Explanation"].dropna())
+    assert "Likely same invoice but needs manual review" in set(summary_sheet["Explanation"].dropna())
+    assert not {
+        "Selected upload ID",
+        "Selected upload time",
+        "Books rows before period filter",
+        "Books rows after period filter",
+        "Reconciliation timestamp",
+        "Tolerance used",
+        "Nearby date tolerance days",
+        "AI status",
+        "AI rows processed",
+    }.intersection(set(summary_sheet["Metric"]))
     possible_matches_sheet = pd.read_excel(workbook, sheet_name="Possible Matches")
     assert possible_matches_sheet.columns[:15].tolist() == [
         "zoho_supplier_name",
@@ -692,6 +730,231 @@ def test_gst_invoice_absent_from_selected_gstr_is_missing_in_gstr(workspace_tmp_
     statuses = set(result["results"]["match_status"])
     assert "missing_in_gstr" in statuses
     assert result["summary"]["missing_in_gstr"] == 1
+
+
+def test_gst_reconciliation_matches_purchase_invoice_recorded_as_expense(workspace_tmp_path):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number="EXP-77", supplier_name="Cloud Vendor"),
+        books_gst_df=_single_books_row(invoice_number="EXP-77", party_name="Cloud Vendor", source_type="expense"),
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].iloc[0]
+    assert row["match_status"] == "matched"
+    assert row["books_source_type"] == "expense"
+
+
+def test_gst_missing_in_books_mentions_expenses_when_only_bills_were_synced(workspace_tmp_path):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number="GSTR-ONLY"),
+        books_gst_df=_single_books_row(invoice_number="OTHER-BILL", taxable_value=2500, igst_amount=450),
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].loc[result["results"]["match_status"] == "missing_in_books"].iloc[0]
+    assert row["action_required"] == "Not found in Bills. Check Expenses or card transactions."
+
+
+def test_gst_missing_in_books_mentions_all_synced_sources_when_expenses_were_searched(workspace_tmp_path):
+    books_df = pd.concat(
+        [
+            _single_books_row(invoice_number="OTHER-BILL", source_type="bill", taxable_value=2500, igst_amount=450),
+            _single_books_row(invoice_number="OTHER-EXP", source_type="expense", taxable_value=2500, igst_amount=450),
+        ],
+        ignore_index=True,
+    )
+
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number="GSTR-ONLY"),
+        books_gst_df=books_df,
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].loc[result["results"]["match_status"] == "missing_in_books"].iloc[0]
+    assert row["action_required"] == "Not found in any synced books source. Record may need to be entered in Zoho."
+
+
+@pytest.mark.parametrize(
+    ("books_invoice", "gstr_invoice", "expected_status", "reason_fragment"),
+    [
+        ("#20702", "20702", "matched", "different invoice number format"),
+        ("014", "INV-PS-2526-014", "matched", "invoice format normalization"),
+        ("17", "25-26/12/HSD17", "possible_match", "prefix/suffix difference"),
+        ("0354", "M1/25-26/0354", "possible_match", "prefix/suffix difference"),
+        ("#016", "2025-26/016", "possible_match", "prefix/suffix difference"),
+        ("STPL/37/2025-26", "STPL/037/2025-26", "possible_match", "leading zero difference"),
+    ],
+)
+def test_gst_invoice_format_safeguards_prevent_missing_in_gstr(
+    workspace_tmp_path,
+    books_invoice,
+    gstr_invoice,
+    expected_status,
+    reason_fragment,
+):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number=gstr_invoice),
+        books_gst_df=_single_books_row(invoice_number=books_invoice),
+        generate_ai_insights=False,
+    )
+
+    assert result["summary"]["missing_in_gstr"] == 0
+    assert result["summary"]["missing_in_books"] == 0
+    row = result["results"].iloc[0]
+    assert row["match_status"] == expected_status
+    assert reason_fragment in row["match_reason"]
+
+
+@pytest.mark.parametrize(
+    ("books_invoice", "gstr_invoice"),
+    [
+        ("#2271", "WT/25-26/2271"),
+        ("014", "INV-PS-2526-014"),
+    ],
+)
+def test_gst_safe_invoice_format_token_matches_are_matched(workspace_tmp_path, books_invoice, gstr_invoice):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number=gstr_invoice),
+        books_gst_df=_single_books_row(invoice_number=books_invoice),
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].iloc[0]
+    assert row["match_status"] == "matched"
+    assert row["status_label"] == "Matched"
+    assert row["match_level"] == "P4_INVOICE_TOKEN"
+    assert row["match_reason"] == (
+        "Matched using invoice format normalization; GSTIN, date, taxable value, and invoice value match."
+    )
+
+
+@pytest.mark.parametrize(
+    ("books_invoice", "gstr_invoice", "books_date", "gstr_date"),
+    [
+        ("#6935", "TIO26HR100568684", "2026-05-01", "2026-05-01"),
+        ("JULY", "TIO26HR100789563", "2026-05-01", "2026-05-04"),
+    ],
+)
+def test_gst_unrelated_invoice_with_gstin_typo_stays_possible_match(
+    workspace_tmp_path,
+    books_invoice,
+    gstr_invoice,
+    books_date,
+    gstr_date,
+):
+    result = reconcile_gst_data(
+        _single_gstr_row(
+            invoice_number=gstr_invoice,
+            gstin="29ABCDE1234F1Z7",
+            invoice_date=gstr_date,
+            supplier_name="Microsoft India",
+        ),
+        _single_books_row(
+            invoice_number=books_invoice,
+            gstin="29ABCDEI234F1Z7",
+            invoice_date=books_date,
+            party_name="Microsoft India",
+        ),
+    )
+
+    row = result.iloc[0]
+    assert row["match_status"] == "possible_match"
+    assert row["match_level"] == "P5_AMOUNT_DATE_CANDIDATE"
+    assert row["match_reason"] == "Possible match; GSTIN differs, possible manual typo."
+    assert row["action_required"] == "Check vendor GSTIN in Zoho/books."
+
+
+@pytest.mark.parametrize(
+    ("invoice_number", "taxable_value", "igst_amount", "raw_total", "gstr_invoice"),
+    [
+        ("INV-PS-2526-017", 119340, 21481.2, 128887.2, 140821.2),
+        ("INV-PS-2526-022", 34425, 6196.5, 37179, 40621.5),
+    ],
+)
+def test_gst_reconciliation_uses_calculated_books_invoice_value_when_zoho_total_is_wrong(
+    workspace_tmp_path,
+    invoice_number,
+    taxable_value,
+    igst_amount,
+    raw_total,
+    gstr_invoice,
+):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(
+            invoice_number=invoice_number,
+            taxable_value=taxable_value,
+            igst_amount=igst_amount,
+        ),
+        books_gst_df=_single_books_row(
+            invoice_number=invoice_number,
+            taxable_value=taxable_value,
+            igst_amount=igst_amount,
+            raw_invoice_value=raw_total,
+        ),
+        generate_ai_insights=False,
+    )
+
+    assert result["summary"]["matched"] == 1
+    row = result["results"].iloc[0]
+    assert row["match_status"] == "matched"
+    assert row["zoho_invoice_value"] == pytest.approx(gstr_invoice)
+    assert row["raw_invoice_value"] == pytest.approx(raw_total)
+    assert row["calculated_invoice_value"] == pytest.approx(gstr_invoice)
+    assert row["invoice_value_source"] == "calculated_from_tax_components"
+    assert row["match_reason"] == "Matched using calculated books invoice value from taxable + GST components"
+
+
+def test_gst_reconciliation_flags_tax_component_type_difference_even_when_totals_match(workspace_tmp_path):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(taxable_value=1000, igst_amount=180),
+        books_gst_df=_single_books_row(taxable_value=1000, igst_amount=0, cgst_amount=90, sgst_amount=90),
+        generate_ai_insights=False,
+    )
+
+    assert result["summary"]["matched"] == 0
+    assert result["summary"]["tax_component_mismatch"] == 1
+    assert result["summary"]["amount_mismatch"] == 0
+    row = result["results"].iloc[0]
+    assert row["match_status"] == "tax_component_mismatch"
+    assert row["status_label"] == "Tax Type Mismatch"
+    assert row["zoho_invoice_value"] == pytest.approx(row["gstr_invoice_value"])
+    assert row["match_reason"] == "Total amount matches, but GST tax component type differs between books and GSTR."
+    assert row["action_required"] == "Check place of supply and GST tax treatment in Zoho/books."
+
+
+def test_gst_reconciliation_keeps_taxable_or_invoice_value_difference_as_amount_mismatch(workspace_tmp_path):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(invoice_number="19510", taxable_value=131285, igst_amount=23631.3),
+        books_gst_df=_single_books_row(invoice_number="19510", taxable_value=131250, igst_amount=23625),
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].iloc[0]
+    assert result["summary"]["tax_component_mismatch"] == 0
+    assert result["summary"]["amount_mismatch"] == 1
+    assert row["match_status"] == "amount_mismatch"
+
+
+def test_gst_reconciliation_exact_tax_components_same_is_matched(workspace_tmp_path):
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_single_gstr_row(taxable_value=15000, igst_amount=2700),
+        books_gst_df=_single_books_row(taxable_value=15000, igst_amount=2700),
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].iloc[0]
+    assert result["summary"]["matched"] == 1
+    assert result["summary"]["tax_component_mismatch"] == 0
+    assert row["match_status"] == "matched"
 
 
 def test_gst_reconciliation_requires_selected_upload_invoice_dates(workspace_tmp_path):

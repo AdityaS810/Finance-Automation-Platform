@@ -27,19 +27,22 @@ AMOUNT_TOLERANCE = 1.0
 GST_AI_MAX_ROWS = 10
 FALLBACK_DATE_TOLERANCE_DAYS = 7
 SUPPLIER_NAME_SIMILARITY = 0.82
+STRICT_FORMAT_DATE_TOLERANCE_DAYS = 0
 GSTR_PERIOD_ERROR = "Could not determine GSTR period from uploaded invoice dates."
 AI_COLUMNS = ["ai_summary", "ai_recommendation", "ai_risk_level"]
 STATUS_SORT_ORDER = {
     "amount_mismatch": 0,
     "mismatch": 0,
-    "possible_match": 1,
-    "missing_in_books": 2,
-    "missing_in_gstr": 3,
-    "matched": 4,
+    "tax_component_mismatch": 1,
+    "possible_match": 2,
+    "missing_in_books": 3,
+    "missing_in_gstr": 4,
+    "matched": 5,
 }
 STATUS_LABELS = {
     "matched": "Matched",
     "amount_mismatch": "Amount Mismatch",
+    "tax_component_mismatch": "Tax Type Mismatch",
     "possible_match": "Possible Match",
     "missing_in_books": "Missing in Books",
     "missing_in_gstr": "Missing in GSTR",
@@ -47,6 +50,7 @@ STATUS_LABELS = {
 ACTION_REQUIRED = {
     "matched": "No action required.",
     "amount_mismatch": "Review taxable value and GST amounts in Zoho/books and GSTR before filing.",
+    "tax_component_mismatch": "Check place of supply and GST tax treatment in Zoho/books.",
     "possible_match": "Confirm manually before marking as matched.",
     "missing_in_books": "Check whether the purchase/sales document exists in Zoho/books or needs to be recorded.",
     "missing_in_gstr": "Verify filing period, supplier GSTIN, and invoice number in the uploaded GSTR report.",
@@ -70,6 +74,7 @@ POSSIBLE_MATCH_COLUMNS = [
 ]
 FINANCE_COLUMNS = [
     "status_label",
+    "books_source_type",
     "zoho_supplier_name",
     "gstr_supplier_name",
     "zoho_gstin",
@@ -99,6 +104,9 @@ FINANCE_COLUMNS = [
     "sgst_books",
     "invoice_value_gstr",
     "invoice_value_books",
+    "raw_invoice_value",
+    "calculated_invoice_value",
+    "invoice_value_source",
     "amount_difference",
     "match_reason",
     "action_required",
@@ -133,7 +141,6 @@ TECHNICAL_AUDIT_COLUMNS = FINANCE_COLUMNS + [
     "gstr_raw_ids",
     "books_raw_ids",
     "gstr_created_at",
-    "books_source_type",
     "books_party_id",
     "books_status",
     "source_org_key",
@@ -277,7 +284,7 @@ def reconcile_gst_data(
         result_rows.append(
             _gstr_result_row(
                 gstr_row,
-                pd.Series(dtype="object"),
+                pd.Series({"missing_in_books_action_required": _missing_in_books_action_required(books_df)}),
                 "missing_in_books",
                 0.0,
                 "Invoice exists in uploaded GSTR but was not found in Zoho/books.",
@@ -299,7 +306,7 @@ def reconcile_gst_data(
                     _gstr_result_row(
                         safeguard_match["gstr_row"],
                         books_row,
-                        "possible_match",
+                        safeguard_match.get("match_status", "possible_match"),
                         safeguard_match["confidence_score"],
                         safeguard_match["match_reason"],
                         safeguard_match["amount_difference"],
@@ -344,7 +351,8 @@ def _priority_ladder_books_match(
                 "matched",
                 "P1_EXACT",
                 1.0,
-                "Invoice found in Zoho/books and selected GSTR with same GSTIN, invoice number, nearby date, and values within tolerance.",
+                _matched_amount_reason(books_row)
+                or "Invoice found in Zoho/books and selected GSTR with same GSTIN, invoice number, nearby date, and values within tolerance.",
                 amount_difference,
             )
         if _has_missing_gst_amount_value(gstr_row, books_row):
@@ -352,10 +360,15 @@ def _priority_ladder_books_match(
                 "GSTIN, invoice number, and invoice date matched, but one or more "
                 "taxable/tax/invoice values are missing in GSTR or books."
             )
-        else:
-            reason = (
-                "GSTIN, invoice number, and invoice date matched, but "
-                f"taxable/tax/invoice values differ by INR {amount_difference:.2f}."
+        if _tax_component_type_differs(gstr_row, books_row, amount_tolerance):
+            return _match_result(
+                books_index,
+                books_row,
+                "tax_component_mismatch",
+                "P1_EXACT",
+                0.86,
+                _tax_component_type_differs_reason(gstr_row, books_row),
+                amount_difference,
             )
         return _match_result(
             books_index,
@@ -363,7 +376,12 @@ def _priority_ladder_books_match(
             "amount_mismatch",
             "P1_EXACT",
             0.85,
-            reason,
+            reason
+            if _has_missing_gst_amount_value(gstr_row, books_row)
+            else (
+                "GSTIN, invoice number, and invoice date matched, but "
+                f"taxable/tax/invoice values differ by INR {amount_difference:.2f}."
+            ),
             amount_difference,
         )
 
@@ -383,7 +401,18 @@ def _priority_ladder_books_match(
                 "matched",
                 "P2_STRONG",
                 0.92,
-                "GSTIN and invoice number matched in Zoho/books and selected GSTR; values are within tolerance.",
+                _matched_amount_reason(books_row)
+                or "GSTIN and invoice number matched in Zoho/books and selected GSTR; values are within tolerance.",
+                amount_difference,
+            )
+        if _tax_component_type_differs(gstr_row, books_row, amount_tolerance):
+            return _match_result(
+                books_index,
+                books_row,
+                "tax_component_mismatch",
+                "P2_STRONG",
+                0.83,
+                _tax_component_type_differs_reason(gstr_row, books_row),
                 amount_difference,
             )
         return _match_result(
@@ -409,6 +438,7 @@ def _priority_ladder_books_match(
     p3_match = _best_invoice_candidate(gstr_row, p3_candidates, amount_tolerance)
     if p3_match is not None:
         books_index, books_row, amounts_match, amount_difference = p3_match
+        p3_reason = _invoice_format_match_reason(gstr_row, books_row)
         if amounts_match:
             return _match_result(
                 books_index,
@@ -416,7 +446,22 @@ def _priority_ladder_books_match(
                 "matched",
                 "P3_FORMAT",
                 0.88,
-                "Invoice number matched after removing spaces and separators; date and values are within tolerance.",
+                _matched_amount_reason(books_row)
+                or (
+                    p3_reason
+                    if p3_reason == "Invoice exists in GSTR with different invoice number format"
+                    else "Invoice number matched after removing spaces and separators; date and values are within tolerance."
+                ),
+                amount_difference,
+            )
+        if _tax_component_type_differs(gstr_row, books_row, amount_tolerance):
+            return _match_result(
+                books_index,
+                books_row,
+                "tax_component_mismatch",
+                "P3_FORMAT",
+                0.79,
+                _tax_component_type_differs_reason(gstr_row, books_row),
                 amount_difference,
             )
         return _match_result(
@@ -446,6 +491,33 @@ def _priority_ladder_books_match(
             amount_difference,
         )
 
+    p4_token_candidates = _invoice_token_candidates(gstr_row, candidate_df)
+    p4_token_candidates = _nearby_date_candidates(
+        gstr_row,
+        p4_token_candidates,
+        fallback_date_tolerance_days,
+    )
+    p4_token_match = _best_invoice_candidate(gstr_row, p4_token_candidates, amount_tolerance)
+    if p4_token_match is not None:
+        books_index, books_row, amounts_match, amount_difference = p4_token_match
+        if _safe_format_only_match(gstr_row, books_row, amount_tolerance):
+            status = "matched"
+            confidence = 0.90
+            reason = "Matched using invoice format normalization; GSTIN, date, taxable value, and invoice value match."
+        else:
+            status = "possible_match"
+            confidence = 0.60
+            reason = _invoice_format_match_reason(gstr_row, books_row)
+        return _match_result(
+            books_index,
+            books_row,
+            status,
+            "P4_INVOICE_TOKEN",
+            confidence,
+            reason,
+            amount_difference,
+        )
+
     p5_match = _best_amount_date_supplier_candidate(
         gstr_row,
         candidate_df,
@@ -454,13 +526,18 @@ def _priority_ladder_books_match(
     )
     if p5_match is not None:
         books_index, books_row, amount_difference = p5_match
+        reason = (
+            "Possible match; GSTIN differs, possible manual typo."
+            if _gstin_possible_typo(gstr_row, books_row)
+            else "Possible match based on invoice value, nearby date, and supplier name similarity; manual review required."
+        )
         return _match_result(
             books_index,
             books_row,
             "possible_match",
             "P5_AMOUNT_DATE_CANDIDATE",
             0.50,
-            "Possible match based on invoice value, nearby date, and supplier name similarity; manual review required.",
+            reason,
             amount_difference,
         )
 
@@ -608,6 +685,9 @@ def _prepare_gstr_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "gstin_key": gstin.map(_normalise_gstin_key),
             "invoice_key": invoice_number.map(_normalise_invoice_key),
             "clean_invoice_key": invoice_number.map(_clean_invoice_key),
+            "stripped_hash_invoice_key": invoice_number.map(strip_hash_invoice).map(_normalise_invoice_key),
+            "numeric_invoice_token": invoice_number.map(numeric_invoice_token),
+            "zero_tolerant_invoice_token": invoice_number.map(_zero_tolerant_invoice_token),
             "supplier_name_key": supplier_name.map(_normalise_name_key),
         }
     )
@@ -633,6 +713,9 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
                 "books_sgst_amount",
                 "books_tax_amount",
                 "books_invoice_value",
+                "books_raw_invoice_value",
+                "books_calculated_invoice_value",
+                "books_invoice_value_source",
                 "books_status",
                 "source_org_key",
                 "source_org_id",
@@ -646,6 +729,9 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
                 "gstin_key",
                 "invoice_key",
                 "clean_invoice_key",
+                "stripped_hash_invoice_key",
+                "numeric_invoice_token",
+                "zero_tolerant_invoice_token",
                 "party_name_key",
             ]
         )
@@ -659,10 +745,15 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
     sgst_amount = _money_series(working_df, ["books_sgst_amount", "sgst"])
     tax_amount = _money_series(working_df, ["books_tax_amount", "total_tax"])
     tax_amount = _fill_missing_or_zero_money(tax_amount, _sum_money_series([igst_amount, cgst_amount, sgst_amount]))
-    invoice_value = _money_series(working_df, ["books_invoice_value", "invoice_value"])
-    invoice_value = _fill_missing_or_zero_money(
-        invoice_value,
-        _sum_money_series([taxable_value, tax_amount], require_all=True),
+    raw_invoice_value = _money_series(working_df, ["raw_invoice_value", "books_raw_invoice_value", "books_invoice_value", "invoice_value"])
+    invoice_value, calculated_invoice_value, invoice_value_source = _books_invoice_value_for_gst(
+        taxable_value,
+        igst_amount,
+        cgst_amount,
+        sgst_amount,
+        tax_amount,
+        raw_invoice_value,
+        AMOUNT_TOLERANCE,
     )
 
     prepared_df = pd.DataFrame(
@@ -680,6 +771,9 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "books_sgst_amount": sgst_amount,
             "books_tax_amount": tax_amount,
             "books_invoice_value": invoice_value,
+            "books_raw_invoice_value": raw_invoice_value,
+            "books_calculated_invoice_value": calculated_invoice_value,
+            "books_invoice_value_source": invoice_value_source,
             "books_status": _first_existing_text(working_df, ["books_status", "status"]),
             "source_org_key": _first_existing_text(working_df, ["source_org_key"]),
             "source_org_id": _first_existing_text(working_df, ["source_org_id"]),
@@ -691,6 +785,9 @@ def _prepare_books_gst_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "gstin_key": gstin.map(_normalise_gstin_key),
             "invoice_key": invoice_number.map(_normalise_invoice_key),
             "clean_invoice_key": invoice_number.map(_clean_invoice_key),
+            "stripped_hash_invoice_key": invoice_number.map(strip_hash_invoice).map(_normalise_invoice_key),
+            "numeric_invoice_token": invoice_number.map(numeric_invoice_token),
+            "zero_tolerant_invoice_token": invoice_number.map(_zero_tolerant_invoice_token),
             "party_name_key": _first_existing_text(
                 working_df,
                 ["party_name", "supplier_name", "customer_name", "vendor_name"],
@@ -741,7 +838,17 @@ def _deduplicate_gst_records(dataframe: pd.DataFrame, source: str) -> pd.DataFra
         column_name
         for column_name in working_df.columns
         if column_name.endswith("_key")
-        and column_name not in {"gstin_key", "invoice_key", "clean_invoice_key", "supplier_name_key", "party_name_key"}
+        and column_name
+        not in {
+            "gstin_key",
+            "invoice_key",
+            "clean_invoice_key",
+            "stripped_hash_invoice_key",
+            "numeric_invoice_token",
+            "zero_tolerant_invoice_token",
+            "supplier_name_key",
+            "party_name_key",
+        }
     ]
     drop_columns = key_columns + [raw_row_column]
     return working_df.drop(columns=[column for column in drop_columns if column in working_df.columns]).reset_index(drop=True)
@@ -859,6 +966,96 @@ def _same_or_missing_gstin_candidates(gstr_row: pd.Series, candidate_df: pd.Data
     ]
 
 
+def _invoice_token_candidates(gstr_row: pd.Series, candidate_df: pd.DataFrame) -> pd.DataFrame:
+    """Return same-GSTIN candidates with invoice token, suffix, or zero-tolerant evidence."""
+    if candidate_df.empty:
+        return candidate_df
+
+    gstr_gstin = str(gstr_row.get("gstin_key", "") or "")
+    if not gstr_gstin:
+        return candidate_df.iloc[0:0]
+
+    keep_indexes = []
+    for books_index, books_row in candidate_df.iterrows():
+        if str(books_row.get("gstin_key", "") or "") != gstr_gstin:
+            continue
+        if _invoice_format_evidence_matches(gstr_row, books_row):
+            keep_indexes.append(books_index)
+    return candidate_df.loc[keep_indexes]
+
+
+def _invoice_format_evidence_matches(gstr_row: pd.Series, books_row: pd.Series) -> bool:
+    """Return True when invoice numbers differ only by known format patterns."""
+    gstr_invoice = gstr_row.get("invoice_number", "")
+    books_invoice = books_row.get("invoice_number", "")
+
+    gstr_compact = str(gstr_row.get("clean_invoice_key", "") or "")
+    books_compact = str(books_row.get("clean_invoice_key", "") or "")
+    if gstr_compact and books_compact and (gstr_compact.endswith(books_compact) or books_compact.endswith(gstr_compact)):
+        return _invoice_token_context_matches(gstr_invoice, books_invoice)
+
+    gstr_token = str(gstr_row.get("numeric_invoice_token", "") or "")
+    books_token = str(books_row.get("numeric_invoice_token", "") or "")
+    if gstr_token and books_token and _zero_tolerant_numeric_equal(gstr_token, books_token):
+        return _invoice_token_context_matches(gstr_invoice, books_invoice)
+
+    return False
+
+
+def _invoice_token_context_matches(left_invoice: Any, right_invoice: Any) -> bool:
+    """Avoid treating unrelated invoice prefixes as equivalent just because digits match."""
+    left_compact = compact_invoice_number(left_invoice)
+    right_compact = compact_invoice_number(right_invoice)
+    left_token = numeric_invoice_token(left_invoice)
+    right_token = numeric_invoice_token(right_invoice)
+    if not left_token or not right_token:
+        return False
+
+    if left_compact == left_token or right_compact == right_token:
+        return True
+
+    left_skeleton = _invoice_alpha_skeleton(left_invoice)
+    right_skeleton = _invoice_alpha_skeleton(right_invoice)
+    return bool(left_skeleton and left_skeleton == right_skeleton)
+
+
+def _safe_format_only_match(gstr_row: pd.Series, books_row: pd.Series, amount_tolerance: float) -> bool:
+    """Return True when invoice format is the only meaningful difference."""
+    if not _strong_invoice_format_evidence(gstr_row, books_row):
+        return False
+
+    same_gstin = str(gstr_row.get("gstin_key", "") or "") == str(books_row.get("gstin_key", "") or "")
+    if not same_gstin:
+        return False
+
+    date_difference = _date_difference_days(gstr_row.get("invoice_date"), books_row.get("books_invoice_date"))
+    if date_difference is None or date_difference > STRICT_FORMAT_DATE_TOLERANCE_DAYS:
+        return False
+
+    compared_pairs = [
+        (gstr_row.get("gstr_taxable_value"), books_row.get("books_taxable_value")),
+        (gstr_row.get("gstr_tax_amount"), books_row.get("books_tax_amount")),
+        (gstr_row.get("gstr_invoice_value"), books_row.get("books_invoice_value")),
+    ]
+    if any(_is_missing_money_value(left) or _is_missing_money_value(right) for left, right in compared_pairs):
+        return False
+    return all(abs(_amount(left) - _amount(right)) <= amount_tolerance for left, right in compared_pairs)
+
+
+def _strong_invoice_format_evidence(gstr_row: pd.Series, books_row: pd.Series) -> bool:
+    """Return True for suffix/token evidence strong enough to auto-match."""
+    gstr_invoice = gstr_row.get("invoice_number", "")
+    books_invoice = books_row.get("invoice_number", "")
+    gstr_token = str(gstr_row.get("numeric_invoice_token", "") or numeric_invoice_token(gstr_invoice))
+    books_token = str(books_row.get("numeric_invoice_token", "") or numeric_invoice_token(books_invoice))
+    if not gstr_token or not books_token or not _zero_tolerant_numeric_equal(gstr_token, books_token):
+        return False
+    if min(len(gstr_token), len(books_token)) < 3:
+        return False
+    alpha_skeleton = _invoice_alpha_skeleton(gstr_invoice) or _invoice_alpha_skeleton(books_invoice)
+    return len(alpha_skeleton) >= 2
+
+
 def _best_amount_date_candidate(
     gstr_row: pd.Series,
     candidate_df: pd.DataFrame,
@@ -946,11 +1143,100 @@ def _missing_in_gstr_safeguard_candidate(
 
     invoice_key = str(books_row.get("invoice_key", "") or "")
     clean_invoice_key = str(books_row.get("clean_invoice_key", "") or "")
+    stripped_hash_invoice_key = str(books_row.get("stripped_hash_invoice_key", "") or "")
     party_name_key = str(books_row.get("party_name_key", "") or "")
+    gstin_key = str(books_row.get("gstin_key", "") or "")
 
-    exact_candidates = gstr_df[(gstr_df["invoice_key"] == invoice_key) & (invoice_key != "")]
+    same_gstin_gstr_df = gstr_df[gstr_df["gstin_key"] == gstin_key] if gstin_key else gstr_df.iloc[0:0]
+
+    exact_candidates = same_gstin_gstr_df[(same_gstin_gstr_df["invoice_key"] == invoice_key) & (invoice_key != "")]
     if not exact_candidates.empty:
         gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, exact_candidates, amount_tolerance)
+        return _safeguard_match_payload(
+            gstr_row,
+            books_row,
+            amount_difference,
+            "P6_SAFEGUARD_INVOICE",
+            0.70,
+            "Invoice exists in GSTR with different invoice number format",
+            amount_tolerance,
+        )
+
+    compact_candidates = same_gstin_gstr_df[
+        (same_gstin_gstr_df["clean_invoice_key"] == clean_invoice_key) & (clean_invoice_key != "")
+    ]
+    if not compact_candidates.empty:
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, compact_candidates, amount_tolerance)
+        reason = _invoice_format_match_reason(gstr_row, books_row)
+        return _safeguard_match_payload(
+            gstr_row,
+            books_row,
+            amount_difference,
+            "P6_SAFEGUARD_COMPACT_INVOICE",
+            0.66,
+            reason,
+            amount_tolerance,
+        )
+
+    stripped_hash_candidates = same_gstin_gstr_df[
+        (same_gstin_gstr_df["invoice_key"] == stripped_hash_invoice_key) & (stripped_hash_invoice_key != "")
+    ]
+    if not stripped_hash_candidates.empty:
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, stripped_hash_candidates, amount_tolerance)
+        return _safeguard_match_payload(
+            gstr_row,
+            books_row,
+            amount_difference,
+            "P6_SAFEGUARD_HASH_STRIPPED",
+            0.72,
+            "Invoice exists in GSTR with different invoice number format",
+            amount_tolerance,
+        )
+
+    token_rows = []
+    for _, gstr_row in same_gstin_gstr_df.iterrows():
+        if _invoice_format_evidence_matches(gstr_row, books_row):
+            token_rows.append(gstr_row)
+
+    if token_rows:
+        candidate_df = pd.DataFrame(token_rows)
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, candidate_df, amount_tolerance)
+        return _safeguard_match_payload(
+            gstr_row,
+            books_row,
+            amount_difference,
+            "P6_SAFEGUARD_INVOICE_TOKEN",
+            0.60,
+            _invoice_format_match_reason(gstr_row, books_row),
+            amount_tolerance,
+        )
+
+    supplier_token_candidates = []
+    for _, gstr_row in gstr_df.iterrows():
+        date_difference = _date_difference_days(gstr_row.get("invoice_date"), books_row.get("books_invoice_date"))
+        if date_difference is None or date_difference > fallback_date_tolerance_days:
+            continue
+        if not party_name_key or not _supplier_names_match(gstr_row, books_row):
+            continue
+        if _invoice_format_evidence_matches(gstr_row, books_row):
+            supplier_token_candidates.append(gstr_row)
+
+    if supplier_token_candidates:
+        candidate_df = pd.DataFrame(supplier_token_candidates)
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, candidate_df, amount_tolerance)
+        return _safeguard_match_payload(
+            gstr_row,
+            books_row,
+            amount_difference,
+            "P6_SAFEGUARD_SUPPLIER_INVOICE_TOKEN",
+            0.55,
+            _invoice_format_match_reason(gstr_row, books_row),
+            amount_tolerance,
+        )
+
+    all_exact_candidates = gstr_df[(gstr_df["invoice_key"] == invoice_key) & (invoice_key != "")]
+    if not all_exact_candidates.empty:
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, all_exact_candidates, amount_tolerance)
         return {
             "gstr_row": gstr_row,
             "match_level": "P6_SAFEGUARD_INVOICE",
@@ -959,9 +1245,9 @@ def _missing_in_gstr_safeguard_candidate(
             "match_reason": "Invoice number exists in selected GSTR, but GSTIN/date/value differs or the GSTR row was already matched elsewhere.",
         }
 
-    compact_candidates = gstr_df[(gstr_df["clean_invoice_key"] == clean_invoice_key) & (clean_invoice_key != "")]
-    if not compact_candidates.empty:
-        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, compact_candidates, amount_tolerance)
+    all_compact_candidates = gstr_df[(gstr_df["clean_invoice_key"] == clean_invoice_key) & (clean_invoice_key != "")]
+    if not all_compact_candidates.empty:
+        gstr_row, amount_difference = _best_gstr_candidate_for_books(books_row, all_compact_candidates, amount_tolerance)
         return {
             "gstr_row": gstr_row,
             "match_level": "P6_SAFEGUARD_COMPACT_INVOICE",
@@ -1007,6 +1293,32 @@ def _missing_in_gstr_safeguard_candidate(
     return None
 
 
+def _safeguard_match_payload(
+    gstr_row: pd.Series,
+    books_row: pd.Series,
+    amount_difference: float,
+    match_level: str,
+    confidence_score: float,
+    reason: str,
+    amount_tolerance: float,
+) -> dict[str, Any]:
+    """Build a safeguard match, promoting only confident format-only differences to matched."""
+    date_difference = _date_difference_days(gstr_row.get("invoice_date"), books_row.get("books_invoice_date"))
+    amounts_match, _ = _gst_amounts_match(gstr_row, books_row, amount_tolerance)
+    same_gstin = str(gstr_row.get("gstin_key", "") or "") == str(books_row.get("gstin_key", "") or "")
+    exact_or_hash = match_level in {"P6_SAFEGUARD_INVOICE", "P6_SAFEGUARD_HASH_STRIPPED"}
+    is_confident_match = same_gstin and amounts_match and date_difference == 0 and exact_or_hash
+
+    return {
+        "gstr_row": gstr_row,
+        "match_level": match_level,
+        "confidence_score": 0.90 if is_confident_match else confidence_score,
+        "amount_difference": amount_difference,
+        "match_status": "matched" if is_confident_match else "possible_match",
+        "match_reason": reason if date_difference in {0, None} else "Invoice exists in GSTR but date differs",
+    }
+
+
 def _best_gstr_candidate_for_books(
     books_row: pd.Series,
     candidate_df: pd.DataFrame,
@@ -1048,6 +1360,20 @@ def _supplier_names_match(gstr_row: pd.Series, books_row: pd.Series) -> bool:
     if not gstr_name or not books_name:
         return True
     return SequenceMatcher(None, gstr_name, books_name).ratio() >= SUPPLIER_NAME_SIMILARITY
+
+
+def _gstin_possible_typo(gstr_row: pd.Series, books_row: pd.Series) -> bool:
+    """Detect common GSTIN manual/OCR confusions while still requiring different GSTIN text."""
+    gstr_gstin = str(gstr_row.get("gstin_key", "") or "")
+    books_gstin = str(books_row.get("gstin_key", "") or "")
+    if not gstr_gstin or not books_gstin or gstr_gstin == books_gstin:
+        return False
+    return _gstin_typo_key(gstr_gstin) == _gstin_typo_key(books_gstin)
+
+
+def _gstin_typo_key(value: str) -> str:
+    """Canonicalize GSTIN characters commonly confused in manual entry or OCR."""
+    return value.translate(str.maketrans({"I": "1", "L": "1", "O": "0"}))
 
 
 def _gst_amounts_match(
@@ -1128,7 +1454,14 @@ def _possible_match_action_required(
     books_invoice_key = str(books_row.get("invoice_key", "") or "")
     gstr_clean_key = str(gstr_row.get("clean_invoice_key", "") or "")
     books_clean_key = str(books_row.get("clean_invoice_key", "") or "")
-    if match_level in {"P3_FORMAT", "P6_SAFEGUARD_COMPACT_INVOICE"} or (
+    if match_level in {
+        "P3_FORMAT",
+        "P4_INVOICE_TOKEN",
+        "P6_SAFEGUARD_COMPACT_INVOICE",
+        "P6_SAFEGUARD_HASH_STRIPPED",
+        "P6_SAFEGUARD_INVOICE_TOKEN",
+        "P6_SAFEGUARD_SUPPLIER_INVOICE_TOKEN",
+    } or (
         gstr_clean_key and books_clean_key and gstr_clean_key == books_clean_key and gstr_invoice_key != books_invoice_key
     ):
         actions.append("Review invoice number format")
@@ -1159,8 +1492,14 @@ def _action_required(
     amount_difference: float | None,
 ) -> str:
     """Return the action text shown to finance users."""
+    if status == "possible_match" and _gstin_possible_typo(gstr_row, books_row):
+        return "Check vendor GSTIN in Zoho/books."
     if status == "possible_match":
         return _possible_match_action_required(gstr_row, books_row, match_level, amount_difference)
+    if status == "missing_in_books":
+        override = str(books_row.get("missing_in_books_action_required", "") or "").strip()
+        if override:
+            return override
     return ACTION_REQUIRED.get(status, "Review manually.")
 
 
@@ -1180,7 +1519,8 @@ def _gstr_result_row(
         "status_label": STATUS_LABELS.get(status, status.replace("_", " ").title()),
         "match_level": match_level,
         "confidence_score": confidence,
-        "source_side": "both" if status in {"matched", "amount_mismatch", "possible_match"} else "gstr",
+        "source_side": "both" if status in {"matched", "amount_mismatch", "tax_component_mismatch", "possible_match"} else "gstr",
+        "books_source_type": books_row.get("books_source_type", ""),
         "zoho_supplier_name": books_row.get("party_name", ""),
         "gstr_supplier_name": gstr_row.get("supplier_name", ""),
         "zoho_gstin": books_row.get("gstin", ""),
@@ -1210,6 +1550,9 @@ def _gstr_result_row(
         "sgst_books": books_row.get("books_sgst_amount", None),
         "invoice_value_gstr": gstr_row.get("gstr_invoice_value", 0),
         "invoice_value_books": books_row.get("books_invoice_value", None),
+        "raw_invoice_value": books_row.get("books_raw_invoice_value", None),
+        "calculated_invoice_value": books_row.get("books_calculated_invoice_value", None),
+        "invoice_value_source": books_row.get("books_invoice_value_source", ""),
         "tax_amount_gstr": gstr_row.get("gstr_tax_amount", 0),
         "tax_amount_books": books_row.get("books_tax_amount", None),
         "amount_difference": rounded_difference,
@@ -1250,6 +1593,7 @@ def _books_missing_in_gstr_row(books_row: pd.Series) -> dict:
         "match_level": "P6_MISSING_IN_GSTR",
         "confidence_score": 0.0,
         "source_side": "books",
+        "books_source_type": books_row.get("books_source_type", ""),
         "zoho_supplier_name": books_row.get("party_name", ""),
         "gstr_supplier_name": "",
         "zoho_gstin": books_row.get("gstin", ""),
@@ -1279,6 +1623,9 @@ def _books_missing_in_gstr_row(books_row: pd.Series) -> dict:
         "sgst_books": books_row.get("books_sgst_amount", 0),
         "invoice_value_gstr": None,
         "invoice_value_books": books_row.get("books_invoice_value", 0),
+        "raw_invoice_value": books_row.get("books_raw_invoice_value", None),
+        "calculated_invoice_value": books_row.get("books_calculated_invoice_value", None),
+        "invoice_value_source": books_row.get("books_invoice_value_source", ""),
         "tax_amount_gstr": None,
         "tax_amount_books": books_row.get("books_tax_amount", 0),
         "amount_difference": 0.0,
@@ -1328,12 +1675,14 @@ def _sort_gst_results(results_df: pd.DataFrame) -> pd.DataFrame:
 def _summary(results: pd.DataFrame, uploaded_rows: int | None = None) -> dict:
     """Build Streamlit KPI counts from GST reconciliation results."""
     amount_mismatch_count = int((results["match_status"] == "amount_mismatch").sum())
+    tax_component_mismatch_count = int((results["match_status"] == "tax_component_mismatch").sum())
     possible_match_count = int((results["match_status"] == "possible_match").sum())
     return {
         "uploaded_gstr_rows": int(uploaded_rows if uploaded_rows is not None else len(results.index)),
         "total_records": int(len(results.index)),
         "matched": int((results["match_status"] == "matched").sum()),
         "amount_mismatch": amount_mismatch_count,
+        "tax_component_mismatch": tax_component_mismatch_count,
         "possible_match": possible_match_count,
         "missing_in_books": int((results["match_status"] == "missing_in_books").sum()),
         "missing_in_gstr": int((results["match_status"] == "missing_in_gstr").sum()),
@@ -1341,6 +1690,22 @@ def _summary(results: pd.DataFrame, uploaded_rows: int | None = None) -> dict:
         "mismatch": amount_mismatch_count,
         "mismatches": amount_mismatch_count,
     }
+
+
+def _missing_in_books_action_required(books_df: pd.DataFrame) -> str:
+    """Return action text based on which purchase-side books sources were searched."""
+    if books_df.empty or "books_source_type" not in books_df.columns:
+        return "Not found in Bills. Check Expenses or card transactions."
+
+    source_types = {
+        str(source_type or "").strip().lower()
+        for source_type in books_df["books_source_type"].dropna().astype(str)
+        if str(source_type or "").strip()
+    }
+    purchase_side_sources = {"expense", "vendor_credit", "journal", "manual_purchase_entry"}
+    if source_types & purchase_side_sources:
+        return "Not found in any synced books source. Record may need to be entered in Zoho."
+    return "Not found in Bills. Check Expenses or card transactions."
 
 
 def _metadata_from_upload_dataframe(
@@ -1413,6 +1778,10 @@ def _deterministic_gst_insight(row: pd.Series) -> dict[str, str]:
         summary = f"Invoice {invoice_number} matched by GSTIN and invoice number, but values differ by INR {amount_difference:.2f}."
         recommendation = "Check invoice taxable value and IGST, CGST, and SGST amounts before filing."
         risk_level = "high" if amount_difference >= 1000 else "medium"
+    elif status == "tax_component_mismatch":
+        summary = f"Invoice {invoice_number} total amount matches, but GST tax component type differs between books and GSTR."
+        recommendation = "Check place of supply and GST tax treatment in Zoho/books."
+        risk_level = "medium"
     elif status == "possible_match":
         if match_level == "P4_WEAK_INVOICE":
             summary = f"Invoice {invoice_number} exists in GSTR, but GSTIN, date, value, or formatting needs review."
@@ -1451,32 +1820,35 @@ def _summary_sheet(
     fallback_date_tolerance_days: int,
 ) -> pd.DataFrame:
     """Build the Excel summary sheet."""
+    period_start = upload_metadata.get("selected_upload_min_date", "")
+    period_end = upload_metadata.get("selected_upload_max_date", "")
     return pd.DataFrame(
         [
-            {"Metric": "Selected file name", "Value": upload_metadata.get("file_name", "")},
-            {"Metric": "Selected upload ID", "Value": upload_metadata.get("upload_id", "")},
-            {"Metric": "Selected upload time", "Value": str(upload_metadata.get("uploaded_at", ""))},
-            {"Metric": "Reconciliation period start", "Value": upload_metadata.get("selected_upload_min_date", "")},
-            {"Metric": "Reconciliation period end", "Value": upload_metadata.get("selected_upload_max_date", "")},
-            {
-                "Metric": "Books rows before period filter",
-                "Value": upload_metadata.get("books_rows_before_period_filter", 0),
-            },
-            {
-                "Metric": "Books rows after period filter",
-                "Value": upload_metadata.get("books_rows_after_period_filter", 0),
-            },
-            {"Metric": "Reconciliation timestamp", "Value": reconciliation_timestamp},
-            {"Metric": "Tolerance used", "Value": amount_tolerance},
-            {"Metric": "Nearby date tolerance days", "Value": fallback_date_tolerance_days},
+            {"Metric": "Selected GSTR file", "Value": upload_metadata.get("file_name", ""), "Explanation": ""},
+            {"Metric": "Reconciliation period", "Value": f"{period_start} to {period_end}", "Explanation": ""},
             {"Metric": "Uploaded GSTR rows", "Value": summary["uploaded_gstr_rows"]},
-            {"Metric": "Matched", "Value": summary["matched"]},
+            {"Metric": "Exact matched", "Value": summary["matched"]},
+            {
+                "Metric": "Tax type mismatch",
+                "Value": summary["tax_component_mismatch"],
+                "Explanation": "Total matches but IGST/CGST/SGST breakup differs",
+            },
             {"Metric": "Amount mismatch", "Value": summary["amount_mismatch"]},
-            {"Metric": "Missing in books", "Value": summary["missing_in_books"]},
-            {"Metric": "Missing in GSTR", "Value": summary["missing_in_gstr"]},
-            {"Metric": "Possible match", "Value": summary["possible_match"]},
-            {"Metric": "AI status", "Value": ai_metadata.get("ai_status", "")},
-            {"Metric": "AI rows processed", "Value": ai_metadata.get("ai_rows_processed", 0)},
+            {
+                "Metric": "Possible match",
+                "Value": summary["possible_match"],
+                "Explanation": "Likely same invoice but needs manual review",
+            },
+            {
+                "Metric": "Missing in GSTR",
+                "Value": summary["missing_in_gstr"],
+                "Explanation": "Books bill not found in uploaded GSTR",
+            },
+            {
+                "Metric": "Missing in Books",
+                "Value": summary["missing_in_books"],
+                "Explanation": "GSTR invoice not found in Zoho/books",
+            },
         ]
     )
 
@@ -1606,6 +1978,7 @@ def run_gst_reconciliation(
             sheet_name="Summary",
             index=False,
         )
+        _finance_sheet(results, ["tax_component_mismatch"]).to_excel(writer, sheet_name="Tax Type Mismatches", index=False)
         _finance_sheet(results, ["amount_mismatch"]).to_excel(writer, sheet_name="Amount Mismatches", index=False)
         _finance_sheet(results, ["missing_in_books"]).to_excel(writer, sheet_name="Missing in Books", index=False)
         _finance_sheet(results, ["missing_in_gstr"]).to_excel(writer, sheet_name="Missing in GSTR", index=False)
@@ -1689,10 +2062,86 @@ def _normalise_invoice_key(value: Any) -> str:
     return text
 
 
+def strip_hash_invoice(value: Any) -> str:
+    """Remove a leading invoice hash while preserving the rest of the invoice number."""
+    return re.sub(r"^#+", "", _normalise_invoice_key(value)).strip()
+
+
+def compact_invoice_number(value: Any) -> str:
+    """Remove common invoice separators, whitespace, backslashes, and hashes."""
+    text = _normalise_invoice_key(value)
+    return re.sub(r"[\s/\-._\\#]", "", text)
+
+
+def numeric_invoice_token(value: Any) -> str:
+    """Extract the meaningful numeric invoice token after known prefixes/year markers."""
+    text = strip_hash_invoice(value)
+    if not text:
+        return ""
+
+    trimmed = re.sub(r"([/\-_.\\])20\d{2}-\d{2}$", "", text)
+    tokens = re.findall(r"\d+", trimmed)
+    if not tokens:
+        return ""
+    return tokens[-1]
+
+
+def zero_tolerant_invoice_compare(left: Any, right: Any) -> bool:
+    """Compare invoice numbers by meaningful numeric token while ignoring leading zeroes."""
+    left_token = numeric_invoice_token(left)
+    right_token = numeric_invoice_token(right)
+    return bool(left_token and right_token and _zero_tolerant_numeric_equal(left_token, right_token))
+
+
 def _clean_invoice_key(value: Any) -> str:
     """Clean invoice number for P3 by removing spaces and common separators."""
-    text = _normalise_invoice_key(value)
-    return re.sub(r"[\s/\-._\\]", "", text)
+    return compact_invoice_number(value)
+
+
+def _zero_tolerant_invoice_token(value: Any) -> str:
+    """Return numeric invoice token with leading zeroes removed for matching."""
+    token = numeric_invoice_token(value)
+    if not token:
+        return ""
+    return str(int(token)) if token.isdigit() else token.lstrip("0")
+
+
+def _zero_tolerant_numeric_equal(left: Any, right: Any) -> bool:
+    """Return True when numeric strings are equal after removing leading zeroes."""
+    left_text = str(left or "").strip()
+    right_text = str(right or "").strip()
+    if not left_text or not right_text or not left_text.isdigit() or not right_text.isdigit():
+        return False
+    return int(left_text) == int(right_text)
+
+
+def _invoice_alpha_skeleton(value: Any) -> str:
+    """Return invoice letters after dropping digits and separators."""
+    return re.sub(r"[\d\s/\-._\\#]", "", _normalise_invoice_key(value))
+
+
+def _invoice_format_match_reason(gstr_row: pd.Series, books_row: pd.Series) -> str:
+    """Describe why two invoice numbers are a format-based match."""
+    date_difference = _date_difference_days(gstr_row.get("invoice_date"), books_row.get("books_invoice_date"))
+    if date_difference is not None and date_difference > 0:
+        return "Invoice exists in GSTR but date differs"
+
+    gstr_invoice = str(gstr_row.get("invoice_number", "") or "")
+    books_invoice = str(books_row.get("invoice_number", "") or "")
+    if strip_hash_invoice(gstr_invoice) == strip_hash_invoice(books_invoice) and gstr_invoice != books_invoice:
+        return "Invoice exists in GSTR with different invoice number format"
+
+    gstr_token = str(gstr_row.get("numeric_invoice_token", "") or numeric_invoice_token(gstr_invoice))
+    books_token = str(books_row.get("numeric_invoice_token", "") or numeric_invoice_token(books_invoice))
+    if gstr_token and books_token and gstr_token != books_token and _zero_tolerant_numeric_equal(gstr_token, books_token):
+        return "Invoice exists in GSTR with leading zero difference"
+
+    gstr_compact = str(gstr_row.get("clean_invoice_key", "") or compact_invoice_number(gstr_invoice))
+    books_compact = str(books_row.get("clean_invoice_key", "") or compact_invoice_number(books_invoice))
+    if gstr_compact and books_compact and (gstr_compact.endswith(books_compact) or books_compact.endswith(gstr_compact)):
+        return "Invoice exists in GSTR with prefix/suffix difference"
+
+    return "Invoice exists in GSTR with different invoice number format"
 
 
 def _normalise_name_key(value: Any) -> str:
@@ -1762,6 +2211,70 @@ def _fill_missing_or_zero_money(source: pd.Series, fallback: pd.Series) -> pd.Se
     source_numeric = pd.to_numeric(source, errors="coerce").round(2)
     fallback_numeric = pd.to_numeric(fallback, errors="coerce").round(2)
     return source_numeric.where(source_numeric.notna() & (source_numeric != 0), fallback_numeric)
+
+
+def _books_invoice_value_for_gst(
+    taxable_value: pd.Series,
+    igst_amount: pd.Series,
+    cgst_amount: pd.Series,
+    sgst_amount: pd.Series,
+    tax_amount: pd.Series,
+    raw_invoice_value: pd.Series,
+    amount_tolerance: float,
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """Choose books invoice value for GST matching, keeping Zoho total for audit."""
+    component_total = _sum_money_series([igst_amount, cgst_amount, sgst_amount])
+    gst_total = _fill_missing_or_zero_money(component_total, tax_amount)
+    calculated_invoice_value = _sum_money_series([taxable_value, gst_total], require_all=True)
+    raw_numeric = pd.to_numeric(raw_invoice_value, errors="coerce").round(2)
+    calculated_numeric = pd.to_numeric(calculated_invoice_value, errors="coerce").round(2)
+
+    has_taxable = pd.to_numeric(taxable_value, errors="coerce").notna()
+    has_gst_value = (
+        pd.to_numeric(igst_amount, errors="coerce").notna()
+        | pd.to_numeric(cgst_amount, errors="coerce").notna()
+        | pd.to_numeric(sgst_amount, errors="coerce").notna()
+        | pd.to_numeric(tax_amount, errors="coerce").notna()
+    )
+    raw_differs = raw_numeric.notna() & ((raw_numeric - calculated_numeric).abs() > amount_tolerance)
+    use_calculated = has_taxable & has_gst_value & calculated_numeric.notna() & raw_differs
+
+    invoice_value = raw_numeric.where(~use_calculated, calculated_numeric)
+    invoice_value = _fill_missing_or_zero_money(invoice_value, calculated_numeric)
+    invoice_value_source = pd.Series("zoho_total_amount", index=raw_invoice_value.index, dtype="object")
+    invoice_value_source.loc[use_calculated] = "calculated_from_tax_components"
+    return invoice_value, calculated_invoice_value, invoice_value_source
+
+
+def _matched_amount_reason(books_row: pd.Series) -> str:
+    """Return a match reason when books invoice value was corrected from GST components."""
+    if str(books_row.get("books_invoice_value_source", "") or "") == "calculated_from_tax_components":
+        return "Matched using calculated books invoice value from taxable + GST components"
+    return ""
+
+
+def _tax_component_type_differs(gstr_row: pd.Series, books_row: pd.Series, amount_tolerance: float) -> bool:
+    """Return True when taxable, total tax, and invoice totals match but GST buckets differ."""
+    total_pairs = [
+        (gstr_row.get("gstr_taxable_value"), books_row.get("books_taxable_value")),
+        (gstr_row.get("gstr_tax_amount"), books_row.get("books_tax_amount")),
+        (gstr_row.get("gstr_invoice_value"), books_row.get("books_invoice_value")),
+    ]
+    if any(_is_missing_money_value(left) or _is_missing_money_value(right) for left, right in total_pairs):
+        return False
+    totals_match = all(abs(_amount(left) - _amount(right)) <= amount_tolerance for left, right in total_pairs)
+    component_pairs = [
+        (gstr_row.get("gstr_igst_amount"), books_row.get("books_igst_amount")),
+        (gstr_row.get("gstr_cgst_amount"), books_row.get("books_cgst_amount")),
+        (gstr_row.get("gstr_sgst_amount"), books_row.get("books_sgst_amount")),
+    ]
+    components_differ = any(abs(_amount(left) - _amount(right)) > amount_tolerance for left, right in component_pairs)
+    return totals_match and components_differ
+
+
+def _tax_component_type_differs_reason(gstr_row: pd.Series, books_row: pd.Series) -> str:
+    """Describe IGST versus CGST/SGST bucket differences for finance review."""
+    return "Total amount matches, but GST tax component type differs between books and GSTR."
 
 
 def _first_existing_text(dataframe: pd.DataFrame, column_names: list[str]) -> pd.Series:

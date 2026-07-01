@@ -33,6 +33,7 @@ AI_PREVIEW_COLUMNS = [
 ]
 GST_PREVIEW_COLUMNS = [
     "status_label",
+    "books_source_type",
     "zoho_supplier_name",
     "gstr_supplier_name",
     "zoho_gstin",
@@ -113,7 +114,6 @@ GST_TECHNICAL_COLUMNS = GST_PREVIEW_COLUMNS + [
     "gstr_raw_ids",
     "books_raw_ids",
     "gstr_created_at",
-    "books_source_type",
     "books_party_id",
     "books_status",
     "source_org_key",
@@ -180,10 +180,11 @@ def _gst_preview_dataframe(results_df):
     status_order = {
         "amount_mismatch": 0,
         "mismatch": 0,
-        "possible_match": 1,
-        "missing_in_books": 2,
-        "missing_in_gstr": 3,
-        "matched": 4,
+        "tax_component_mismatch": 1,
+        "possible_match": 2,
+        "missing_in_books": 3,
+        "missing_in_gstr": 4,
+        "matched": 5,
     }
     preview_df["status_sort_order"] = preview_df["match_status"].map(status_order).fillna(99)
     preview_df = preview_df.sort_values(by=["status_sort_order", "gstin", "invoice_number"], kind="stable")
@@ -441,18 +442,26 @@ with gst_tab:
             "Reconciliation period: "
             f"{gst_result.get('selected_upload_min_date', '')} to {gst_result.get('selected_upload_max_date', '')}"
         )
-        summary_columns = st.columns(6)
+        summary_columns = st.columns(7)
         with summary_columns[0]:
             metric_card("Uploaded GSTR rows", str(gst_summary["uploaded_gstr_rows"]), caption="Selected file", status="Info", icon="UR")
         with summary_columns[1]:
             metric_card("Exact matched", str(gst_summary["matched"]), caption="Matched in books and GSTR", status="Success", icon="MT")
         with summary_columns[2]:
-            metric_card("Amount mismatch", str(gst_summary["amount_mismatch"]), caption="Values differ", status="Error", icon="AM")
+            metric_card(
+                "Tax type mismatch",
+                str(gst_summary["tax_component_mismatch"]),
+                caption="Tax breakup differs",
+                status="Warning",
+                icon="TT",
+            )
         with summary_columns[3]:
-            metric_card("Possible match", str(gst_summary["possible_match"]), caption="Manual review", status="Warning", icon="PM")
+            metric_card("Amount mismatch", str(gst_summary["amount_mismatch"]), caption="Values differ", status="Error", icon="AM")
         with summary_columns[4]:
-            metric_card("Missing in GSTR", str(gst_summary["missing_in_gstr"]), caption="Books not in upload", status="Error", icon="MG")
+            metric_card("Possible match", str(gst_summary["possible_match"]), caption="Manual review", status="Warning", icon="PM")
         with summary_columns[5]:
+            metric_card("Missing in GSTR", str(gst_summary["missing_in_gstr"]), caption="Books not in upload", status="Error", icon="MG")
+        with summary_columns[6]:
             metric_card("Missing in books", str(gst_summary["missing_in_books"]), caption="Upload not in books", status="Error", icon="MB")
 
         st.caption(gst_result["message"])
@@ -460,6 +469,7 @@ with gst_tab:
 
         (
             summary_tab,
+            tax_type_tab,
             amount_tab,
             missing_books_tab,
             missing_gstr_tab,
@@ -469,6 +479,7 @@ with gst_tab:
         ) = st.tabs(
             [
                 "Summary",
+                "Tax type mismatch",
                 "Amount mismatches",
                 "Missing in books",
                 "Missing in GSTR",
@@ -479,30 +490,40 @@ with gst_tab:
         )
 
         with summary_tab:
-            st.write(
-                {
-                    "selected_file_name": selected_upload.get("file_name", ""),
-                    "selected_upload_id": selected_upload.get("upload_id", ""),
-                    "uploaded_at": _friendly_timestamp(selected_upload.get("uploaded_at")),
-                    "row_count": selected_upload.get("row_count", gst_summary["uploaded_gstr_rows"]),
-                    "reconciliation_period": (
-                        f"{gst_result.get('selected_upload_min_date', '')} "
-                        f"to {gst_result.get('selected_upload_max_date', '')}"
-                    ),
-                    "books_rows_before_period_filter": gst_result.get("books_rows_before_period_filter", 0),
-                    "books_rows_after_period_filter": gst_result.get("books_rows_after_period_filter", 0),
-                    "tolerance_used": gst_result.get("tolerance_used", 1.0),
-                    "nearby_date_tolerance_days": gst_result.get("fallback_date_tolerance_days", 7),
-                    "reconciliation_timestamp": gst_result.get("reconciliation_timestamp", ""),
-                }
+            period_text = f"{gst_result.get('selected_upload_min_date', '')} to {gst_result.get('selected_upload_max_date', '')}"
+            summary_rows = pd.DataFrame(
+                [
+                    {"Item": "Selected GSTR file", "Value": selected_upload.get("file_name", "")},
+                    {"Item": "Reconciliation period", "Value": period_text},
+                    {"Item": "Uploaded GSTR rows", "Value": gst_summary["uploaded_gstr_rows"]},
+                    {"Item": "Exact matched", "Value": gst_summary["matched"]},
+                    {"Item": "Tax type mismatch", "Value": gst_summary["tax_component_mismatch"]},
+                    {"Item": "Amount mismatch", "Value": gst_summary["amount_mismatch"]},
+                    {"Item": "Possible match", "Value": gst_summary["possible_match"]},
+                    {"Item": "Missing in GSTR", "Value": gst_summary["missing_in_gstr"]},
+                    {"Item": "Missing in Books", "Value": gst_summary["missing_in_books"]},
+                ]
             )
-            st.markdown(
-                "- Missing in books = invoice exists in uploaded GSTR but was not found in Zoho/books.\n"
-                "- Missing in GSTR = invoice exists in Zoho/books but was not found in selected uploaded GSTR.\n"
-                "- Amount mismatch = invoice was found, but taxable/tax/invoice values differ.\n"
-                "- Possible match = invoice appears to exist in the selected GSTR upload but needs manual finance review."
+            st.dataframe(summary_rows, use_container_width=True, hide_index=True)
+            st.dataframe(
+                pd.DataFrame(
+                    [
+                        {"Status": "Missing in GSTR", "Explanation": "Books bill not found in uploaded GSTR"},
+                        {"Status": "Missing in Books", "Explanation": "GSTR invoice not found in Zoho/books"},
+                        {"Status": "Tax Type Mismatch", "Explanation": "Total matches but IGST/CGST/SGST breakup differs"},
+                        {"Status": "Possible Match", "Explanation": "Likely same invoice but needs manual review"},
+                    ]
+                ),
+                use_container_width=True,
+                hide_index=True,
             )
 
+        with tax_type_tab:
+            st.dataframe(
+                _gst_status_dataframe(gst_result["results"], ["tax_component_mismatch"]),
+                use_container_width=True,
+                hide_index=True,
+            )
         with amount_tab:
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["amount_mismatch"]), use_container_width=True, hide_index=True)
         with missing_books_tab:
