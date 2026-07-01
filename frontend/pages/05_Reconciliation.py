@@ -205,6 +205,97 @@ def _gst_status_dataframe(results_df, statuses):
     return _gst_preview_dataframe(status_df)
 
 
+def _first_available_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """Return the first available column from a preferred list."""
+    return next((column for column in candidates if column in df.columns), None)
+
+
+def _blank_count(df: pd.DataFrame, candidates: list[str]) -> int:
+    """Count blank values in the first available column."""
+    column = _first_available_column(df, candidates)
+    if column is None:
+        return len(df)
+
+    return int(df[column].fillna("").astype(str).str.strip().eq("").sum())
+
+
+def _present_count(df: pd.DataFrame, candidates: list[str]) -> int:
+    """Count present values in the first available column."""
+    column = _first_available_column(df, candidates)
+    if column is None:
+        return 0
+
+    return int(df[column].fillna("").astype(str).str.strip().ne("").sum())
+
+
+def _show_top_values(df: pd.DataFrame, title: str, candidates: list[str]) -> None:
+    """Show the top nonblank values for an available analysis column."""
+    column = _first_available_column(df, candidates)
+    if column is None:
+        st.caption(f"{title}: not available in this reconciliation output.")
+        return
+
+    top_values = (
+        df[column]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .value_counts()
+        .head(10)
+        .rename_axis(title)
+        .reset_index(name="Rows")
+    )
+    if top_values.empty:
+        st.caption(f"{title}: no populated values found.")
+        return
+
+    st.dataframe(top_values, use_container_width=True, hide_index=True)
+
+
+def _show_missing_books_analysis(results_df: pd.DataFrame) -> None:
+    """Render finance-friendly analysis for GSTR rows missing in books."""
+    if "match_status" not in results_df.columns:
+        st.info("Missing in Books analysis is unavailable because match status is not present.")
+        return
+
+    missing_books_df = results_df[results_df["match_status"] == "missing_in_books"].copy()
+    if missing_books_df.empty:
+        st.success("No Missing in Books rows found for the selected GSTR upload.")
+        return
+
+    st.info(
+        "These invoices are present in uploaded GSTR but were not found in Zoho/books "
+        "with reliable GSTIN, invoice number, date and amount match."
+    )
+
+    metric_columns = st.columns(4)
+    with metric_columns[0]:
+        st.metric("Missing in Books rows", len(missing_books_df))
+    with metric_columns[1]:
+        st.metric("Blank GSTIN", _blank_count(missing_books_df, ["gstr_gstin", "gstin"]))
+    with metric_columns[2]:
+        st.metric("Blank invoice number", _blank_count(missing_books_df, ["gstr_invoice_number", "invoice_number"]))
+    with metric_columns[3]:
+        st.metric("Invoice value present", _present_count(missing_books_df, ["gstr_invoice_value", "invoice_value_gstr", "invoice_value"]))
+
+    supplier_column, gstin_column = st.columns(2)
+    with supplier_column:
+        st.markdown("**Top suppliers**")
+        _show_top_values(missing_books_df, "Supplier", ["gstr_supplier_name", "supplier_name"])
+    with gstin_column:
+        st.markdown("**Top GSTINs**")
+        _show_top_values(missing_books_df, "GSTIN", ["gstr_gstin", "gstin"])
+
+    st.markdown("**Suggested actions**")
+    st.markdown(
+        "- Check whether invoices are recorded as Bills, Expenses, Vendor Credits, or reimbursements.\n"
+        "- Verify supplier GSTIN and invoice number in Zoho.\n"
+        "- If not booked, record the document in Zoho before claiming ITC."
+    )
+
+
 def _gst_technical_audit_dataframe(results_df):
     """Return GST technical audit columns with raw traceability fields."""
     available_columns = [column for column in GST_TECHNICAL_COLUMNS if column in results_df.columns]
@@ -527,6 +618,7 @@ with gst_tab:
         with amount_tab:
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["amount_mismatch"]), use_container_width=True, hide_index=True)
         with missing_books_tab:
+            _show_missing_books_analysis(gst_result["results"])
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["missing_in_books"]), use_container_width=True, hide_index=True)
         with missing_gstr_tab:
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["missing_in_gstr"]), use_container_width=True, hide_index=True)
