@@ -455,22 +455,22 @@ parsed AS (
     raw.source_country,
     raw.source_currency,
     raw.source_record_id,
-    raw.source_record_id AS expense_id,
-    COALESCE(JSON_VALUE(raw.raw_json, '$.reference_number'), JSON_VALUE(raw.raw_json, '$.invoice_number'), JSON_VALUE(raw.raw_json, '$.bill_number'), JSON_VALUE(raw.raw_json, '$.expense_number')) AS expense_number,
-    COALESCE(JSON_VALUE(raw.raw_json, '$.vendor_id'), JSON_VALUE(raw.raw_json, '$.payee_id'), JSON_VALUE(raw.raw_json, '$.customer_id')) AS vendor_id,
-    COALESCE(JSON_VALUE(raw.raw_json, '$.vendor_name'), JSON_VALUE(raw.raw_json, '$.payee_name'), JSON_VALUE(raw.raw_json, '$.customer_name'), JSON_VALUE(raw.raw_json, '$.merchant_name'), JSON_VALUE(raw.raw_json, '$.paid_through_account_name')) AS vendor_name,
-    SAFE_CAST(COALESCE(JSON_VALUE(raw.raw_json, '$.date'), JSON_VALUE(raw.raw_json, '$.expense_date')) AS DATE) AS expense_date,
+    COALESCE(raw.source_record_id, JSON_VALUE(raw.raw_json, '$.expense_id')) AS expense_id,
+    COALESCE(JSON_VALUE(raw.raw_json, '$.reference_number'), JSON_VALUE(raw.raw_json, '$.expense_number'), JSON_VALUE(raw.raw_json, '$.invoice_number')) AS expense_number,
+    JSON_VALUE(raw.raw_json, '$.vendor_id') AS vendor_id,
+    COALESCE(JSON_VALUE(raw.raw_json, '$.vendor_name'), JSON_VALUE(raw.raw_json, '$.merchant_name'), JSON_VALUE(raw.raw_json, '$.paid_through_account_name'), JSON_VALUE(raw.raw_json, '$.employee_name')) AS vendor_name,
+    SAFE_CAST(JSON_VALUE(raw.raw_json, '$.date') AS DATE) AS expense_date,
     JSON_VALUE(raw.raw_json, '$.status') AS status,
     COALESCE(JSON_VALUE(raw.raw_json, '$.currency_code'), raw.source_currency, 'INR') AS original_currency,
     SAFE_CAST(JSON_VALUE(raw.raw_json, '$.exchange_rate') AS NUMERIC) AS exchange_rate,
-    COALESCE(line_amounts.line_taxable_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sub_total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.subtotal') AS NUMERIC)) AS sub_total_amount,
-    COALESCE(line_amounts.line_taxable_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.taxable_amount') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sub_total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.subtotal') AS NUMERIC)) AS taxable_amount,
-    COALESCE(tax_breakup.tax_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.tax_total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.tax_amount') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.total_tax') AS NUMERIC)) AS tax_amount,
-    COALESCE(tax_breakup.igst_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.igst') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.igst_amount') AS NUMERIC)) AS igst_amount,
-    COALESCE(tax_breakup.cgst_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.cgst') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.cgst_amount') AS NUMERIC)) AS cgst_amount,
-    COALESCE(tax_breakup.sgst_amount, SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sgst') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sgst_amount') AS NUMERIC)) AS sgst_amount,
+    COALESCE(SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sub_total') AS NUMERIC), line_amounts.line_taxable_amount) AS sub_total_amount,
+    COALESCE(SAFE_CAST(JSON_VALUE(raw.raw_json, '$.sub_total') AS NUMERIC), line_amounts.line_taxable_amount) AS taxable_amount,
+    COALESCE(SAFE_CAST(JSON_VALUE(raw.raw_json, '$.tax_amount') AS NUMERIC), tax_breakup.tax_amount) AS tax_amount,
+    tax_breakup.igst_amount,
+    tax_breakup.cgst_amount,
+    tax_breakup.sgst_amount,
     COALESCE(SAFE_CAST(JSON_VALUE(raw.raw_json, '$.total') AS NUMERIC), SAFE_CAST(JSON_VALUE(raw.raw_json, '$.amount') AS NUMERIC)) AS total_amount,
-    COALESCE(JSON_VALUE(raw.raw_json, '$.vendor_gst_no'), JSON_VALUE(raw.raw_json, '$.gst_no'), JSON_VALUE(raw.raw_json, '$.gstin'), JSON_VALUE(raw.raw_json, '$.tax_identification_number')) AS gstin,
+    COALESCE(JSON_VALUE(raw.raw_json, '$.gst_no'), JSON_VALUE(raw.raw_json, '$.gstin'), JSON_VALUE(raw.raw_json, '$.tax_identification_number')) AS gstin,
     JSON_VALUE(raw.raw_json, '$.gst_treatment') AS gst_treatment,
     COALESCE(JSON_VALUE(raw.raw_json, '$.destination_of_supply'), JSON_VALUE(raw.raw_json, '$.source_of_supply'), JSON_VALUE(raw.raw_json, '$.place_of_supply'), JSON_VALUE(raw.raw_json, '$.place_of_supply_code')) AS place_of_supply,
     raw.loaded_at
@@ -1289,4 +1289,11 @@ SELECT
     ELSE 'zoho_total_amount'
   END,
   status, currency_code, original_currency, source_org_key, source_org_id, source_org_name, run_id, source_record_id, loaded_at
-FROM expense_source;
+FROM expense_source
+WHERE
+  (gstin IS NOT NULL AND TRIM(gstin) != '')
+  OR COALESCE(tax_amount, 0) != 0
+  OR COALESCE(igst_amount, 0) != 0
+  OR COALESCE(cgst_amount, 0) != 0
+  OR COALESCE(sgst_amount, 0) != 0
+  OR LOWER(COALESCE(gst_treatment, '')) NOT IN ('', 'out_of_scope', 'non_gst', 'non-gst');
