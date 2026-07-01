@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -59,6 +59,32 @@ def fetch_bank_reconciliation_data(
         WHERE upload_id = @upload_id
         ORDER BY transaction_date, upload_id, raw_row_number
     """
+    bank_df = query_to_dataframe(
+        client,
+        bank_query,
+        [bigquery.ScalarQueryParameter("upload_id", "STRING", selected_upload["upload_id"])],
+    )
+
+    min_bank_date, max_bank_date = _bank_date_bounds(bank_df)
+    if min_bank_date is None or max_bank_date is None:
+        print("[Bank Reconciliation] No valid bank dates found. Accounting comparison query will return no rows.")
+        accounting_query = f"""
+        SELECT
+            transaction_id AS accounting_record_id,
+            transaction_date AS accounting_date,
+            counterparty_name AS accounting_party_name,
+            reference_number,
+            transaction_number,
+            transaction_type,
+            transaction_amount AS accounting_amount
+        FROM {table_name(resolved_project_id, ACCOUNTING_INPUT_VIEW)}
+        WHERE FALSE
+        ORDER BY transaction_date, transaction_id
+    """
+        return bank_df, query_to_dataframe(client, accounting_query)
+
+    accounting_start_date = min_bank_date - timedelta(days=DATE_TOLERANCE_DAYS)
+    accounting_end_date = max_bank_date + timedelta(days=DATE_TOLERANCE_DAYS)
     accounting_query = f"""
         SELECT
             transaction_id AS accounting_record_id,
@@ -69,15 +95,26 @@ def fetch_bank_reconciliation_data(
             transaction_type,
             transaction_amount AS accounting_amount
         FROM {table_name(resolved_project_id, ACCOUNTING_INPUT_VIEW)}
+        WHERE transaction_date BETWEEN @accounting_start_date AND @accounting_end_date
         ORDER BY transaction_date, transaction_id
     """
+    accounting_params = [
+        bigquery.ScalarQueryParameter("accounting_start_date", "DATE", accounting_start_date),
+        bigquery.ScalarQueryParameter("accounting_end_date", "DATE", accounting_end_date),
+    ]
+    return bank_df, query_to_dataframe(client, accounting_query, accounting_params)
 
-    bank_df = query_to_dataframe(
-        client,
-        bank_query,
-        [bigquery.ScalarQueryParameter("upload_id", "STRING", selected_upload["upload_id"])],
-    )
-    return bank_df, query_to_dataframe(client, accounting_query)
+
+def _bank_date_bounds(bank_df: pd.DataFrame) -> tuple[Any | None, Any | None]:
+    """Return the selected bank upload's min/max transaction dates."""
+    if bank_df.empty or "bank_date" not in bank_df.columns:
+        return None, None
+
+    bank_dates = pd.to_datetime(bank_df["bank_date"], errors="coerce").dropna()
+    if bank_dates.empty:
+        return None, None
+
+    return bank_dates.min().date(), bank_dates.max().date()
 
 
 def _normalise_text(value: Any) -> str:
@@ -315,7 +352,12 @@ def _is_better_candidate(
 
 def _is_opening_balance_text(normalised_text: str) -> bool:
     """Detect bank statement opening-balance rows that are not transactions."""
-    return "opening balance" in normalised_text or "opening bal" in normalised_text
+    return (
+        "opening balance" in normalised_text
+        or "opening bal" in normalised_text
+        or "balance b f" in normalised_text
+        or "balance bf" in normalised_text
+    )
 
 
 def _opening_balance_result_row(bank_row: pd.Series) -> dict:

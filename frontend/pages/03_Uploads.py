@@ -83,7 +83,19 @@ with bank_tab:
                 bank_df = parse_bank_pdf(uploaded_bank_file)
                 bank_df = remove_duplicate_columns(bank_df)
                 validation_result = validate_required_columns(bank_df, bank_required_columns)
-                st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
+                parser_summary = bank_df.attrs.get("parser_debug_summary", {})
+                if parser_summary:
+                    st.info(
+                        "PDF parser summary: "
+                        f"{parser_summary.get('pages_processed', 0)} pages processed, "
+                        f"{parser_summary.get('rows_extracted', len(bank_df.index))} rows extracted, "
+                        f"first date {parser_summary.get('first_date')}, "
+                        f"last date {parser_summary.get('last_date')}."
+                    )
+                else:
+                    st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
+                if bank_df.attrs.get("parser_warning"):
+                    st.warning(bank_df.attrs["parser_warning"])
 
             else:
                 bank_df = None
