@@ -83,7 +83,7 @@ with bank_tab:
                 bank_df = parse_bank_pdf(uploaded_bank_file)
                 bank_df = remove_duplicate_columns(bank_df)
                 validation_result = validate_required_columns(bank_df, bank_required_columns)
-                st.info("PDF extraction is still using a placeholder parser. The expected output structure is shown below.")
+                st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
 
             else:
                 bank_df = None
