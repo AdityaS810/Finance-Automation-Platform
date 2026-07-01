@@ -52,7 +52,7 @@ def main():
         {
             "name": "expenses",
             "fetch_func": fetch_expenses,
-            "bq_table": "zoho_expenses_raw",
+            "bq_table": "zoho_raw",
             "id_field": "expense_id",
         },
         {
