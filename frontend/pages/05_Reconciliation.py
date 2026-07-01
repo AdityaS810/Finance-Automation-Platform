@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+from io import BytesIO
 from pathlib import Path
 
 import pandas as pd
@@ -31,6 +32,77 @@ AI_PREVIEW_COLUMNS = [
     "ai_recommendation",
     "ai_risk_level",
 ]
+TECHNICAL_DEFAULT_HIDE_COLUMNS = [
+    "selected_upload_id",
+    "reconciliation_timestamp",
+    "source_org_key",
+    "source_record_id",
+    "loaded_at",
+    "run_id",
+    "raw_json",
+]
+BANK_REVIEW_COLUMNS = [
+    "review_priority",
+    "match_status",
+    "ai_risk_level",
+    "confidence_score",
+    "bank_date",
+    "bank_narration",
+    "bank_amount",
+    "accounting_date",
+    "accounting_party_name",
+    "accounting_amount",
+    "transaction_type",
+    "reference_number",
+    "match_reason",
+    "ai_summary",
+    "ai_recommendation",
+]
+BANK_TECHNICAL_COLUMNS = BANK_REVIEW_COLUMNS + [
+    "bank_line_id",
+    "upload_id",
+    "raw_row_number",
+    "debit_amount",
+    "credit_amount",
+    "balance_amount",
+    "accounting_record_id",
+    "transaction_number",
+    "selected_upload_id",
+    "selected_file_name",
+    "reconciliation_timestamp",
+]
+GST_REVIEW_COLUMNS = [
+    "review_priority",
+    "match_status",
+    "ai_risk_level",
+    "gstr_invoice_number",
+    "books_invoice_number",
+    "zoho_invoice_number",
+    "gstr_supplier_name",
+    "party_name",
+    "gstr_gstin",
+    "gstin",
+    "gstr_invoice_date",
+    "books_invoice_date",
+    "zoho_invoice_date",
+    "taxable_value",
+    "taxable_value_gstr",
+    "taxable_value_books",
+    "invoice_value",
+    "invoice_value_gstr",
+    "invoice_value_books",
+    "match_reason",
+    "ai_summary",
+    "ai_recommendation",
+]
+HIGH_PRIORITY_STATUSES = {
+    "bank_not_in_books",
+    "books_not_in_bank",
+    "missing_in_books",
+    "missing_in_gstr",
+    "amount_mismatch",
+}
+MEDIUM_PRIORITY_STATUSES = {"possible_match"}
 GST_PREVIEW_COLUMNS = [
     "status_label",
     "books_source_type",
@@ -134,7 +206,7 @@ GST_STAGE_PROGRESS = {
 }
 
 
-def _download_excel_button(label: str, export_path: Path) -> None:
+def _download_excel_button(label: str, export_path: Path, key: str | None = None) -> None:
     """Render a download button for a generated Excel workbook."""
     if not export_path.exists():
         return
@@ -146,7 +218,28 @@ def _download_excel_button(label: str, export_path: Path) -> None:
             file_name=export_path.name,
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             use_container_width=True,
+            key=key,
         )
+
+
+def _download_dataframe_button(label: str, dataframe: pd.DataFrame, file_name: str, key: str) -> None:
+    """Render an Excel download button for a dataframe subset."""
+    if dataframe.empty:
+        st.download_button(label, data=b"", file_name=file_name, disabled=True, use_container_width=True, key=key)
+        return
+
+    output = BytesIO()
+    with pd.ExcelWriter(output, engine="openpyxl") as writer:
+        dataframe.to_excel(writer, sheet_name="Rows", index=False)
+
+    st.download_button(
+        label,
+        data=output.getvalue(),
+        file_name=file_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        use_container_width=True,
+        key=key,
+    )
 
 
 def _show_ai_status(result: dict) -> None:
@@ -156,12 +249,13 @@ def _show_ai_status(result: dict) -> None:
 
     if ai_status == "enabled":
         st.success(f"Vertex AI insights enabled. {ai_message}")
+        st.caption("AI insights are added only for selected exception rows. Matching remains rule-based.")
     elif ai_status == "not_required":
         st.info(ai_message)
     elif ai_status == "skipped":
-        st.info(f"{ai_message} Fallback insights are displayed in the review tables.")
+        st.info("Showing rule-based fallback insights. Enable Vertex AI for richer row-level explanations.")
     else:
-        st.warning(f"{ai_message} Fallback insights are displayed in the review tables.")
+        st.warning("Showing rule-based fallback insights. Enable Vertex AI for richer row-level explanations.")
 
 
 def _show_ai_summary_card(result: dict, results_df: pd.DataFrame, title: str) -> None:
@@ -189,10 +283,126 @@ def _show_ai_summary_card(result: dict, results_df: pd.DataFrame, title: str) ->
 
     if ai_status == "enabled":
         st.success(f"{summary_text} {ai_message}")
+        st.caption("AI insights are added only for selected exception rows. Matching remains rule-based.")
     elif ai_status == "not_required":
         st.info(f"{summary_text} {ai_message}")
     else:
-        st.warning(f"{summary_text} {ai_message} Fallback insights are displayed in the review tables.")
+        st.warning(
+            f"{summary_text} Showing rule-based fallback insights. "
+            "Enable Vertex AI for richer row-level explanations."
+        )
+
+
+def _review_priority(row: pd.Series) -> str:
+    """Classify UI-only review priority from status and AI risk."""
+    status = str(row.get("match_status", "") or "").lower()
+    risk = str(row.get("ai_risk_level", "") or "").lower()
+    if risk == "high" or status in HIGH_PRIORITY_STATUSES:
+        return "High Priority"
+    if risk == "medium" or status in MEDIUM_PRIORITY_STATUSES:
+        return "Medium Priority"
+    return "Low Priority"
+
+
+def _with_review_priority(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Return a display copy with UI-only review priority."""
+    display_df = dataframe.copy()
+    if display_df.empty:
+        display_df["review_priority"] = pd.Series(dtype="object")
+        return display_df
+    display_df["review_priority"] = display_df.apply(_review_priority, axis=1)
+    return display_df
+
+
+def _friendly_dataframe(dataframe: pd.DataFrame, preferred_columns: list[str]) -> pd.DataFrame:
+    """Order business-facing columns first and hide noisy audit columns by default."""
+    available_preferred = [column for column in preferred_columns if column in dataframe.columns]
+    remaining = [
+        column
+        for column in dataframe.columns
+        if column not in available_preferred and column not in TECHNICAL_DEFAULT_HIDE_COLUMNS
+    ]
+    return dataframe.loc[:, available_preferred + remaining].copy()
+
+
+def _bank_review_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    return _friendly_dataframe(_with_review_priority(dataframe), BANK_REVIEW_COLUMNS)
+
+
+def _gst_review_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    return _friendly_dataframe(_with_review_priority(dataframe), GST_REVIEW_COLUMNS)
+
+
+def _bank_technical_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
+    display_df = _with_review_priority(dataframe)
+    available_columns = [column for column in BANK_TECHNICAL_COLUMNS if column in display_df.columns]
+    remaining = [column for column in display_df.columns if column not in available_columns]
+    return display_df.loc[:, available_columns + remaining].copy()
+
+
+def _filter_search(dataframe: pd.DataFrame, search_text: str, candidates: list[str]) -> pd.DataFrame:
+    """Filter rows when any candidate text column contains the search term."""
+    search = (search_text or "").strip().lower()
+    if not search:
+        return dataframe
+
+    available_columns = [column for column in candidates if column in dataframe.columns]
+    if not available_columns:
+        return dataframe
+
+    search_frame = dataframe[available_columns].fillna("").astype(str).agg(" ".join, axis=1).str.lower()
+    return dataframe[search_frame.str.contains(search, regex=False)].copy()
+
+
+def _filter_min_amount(dataframe: pd.DataFrame, minimum_amount: float, candidates: list[str]) -> pd.DataFrame:
+    """Filter rows by absolute amount across available amount columns."""
+    if minimum_amount <= 0:
+        return dataframe
+
+    available_columns = [column for column in candidates if column in dataframe.columns]
+    if not available_columns:
+        return dataframe
+
+    amount_frame = dataframe[available_columns].apply(pd.to_numeric, errors="coerce").abs()
+    return dataframe[amount_frame.max(axis=1).fillna(0) >= minimum_amount].copy()
+
+
+def _bank_filtered_dataframe(dataframe: pd.DataFrame, key_prefix: str) -> pd.DataFrame:
+    """Render display-only bank filters and return filtered rows."""
+    if dataframe.empty:
+        return dataframe
+
+    filter_columns = st.columns([1, 1, 2, 1])
+    with filter_columns[0]:
+        risk_filter = st.selectbox("Risk", ["All", "High", "Medium", "Low"], key=f"{key_prefix}_risk")
+    with filter_columns[1]:
+        statuses = sorted(str(status) for status in dataframe.get("match_status", pd.Series(dtype=str)).dropna().unique())
+        status_filter = st.selectbox("Status", ["All", *statuses], key=f"{key_prefix}_status")
+    with filter_columns[2]:
+        search_text = st.text_input("Search narration / party / invoice / GSTIN / reference", key=f"{key_prefix}_search")
+    with filter_columns[3]:
+        minimum_amount = st.number_input("Minimum amount", min_value=0.0, value=0.0, step=100.0, key=f"{key_prefix}_amount")
+
+    filtered_df = dataframe.copy()
+    if risk_filter != "All":
+        filtered_df = filtered_df[filtered_df["review_priority"].str.startswith(risk_filter)]
+    if status_filter != "All":
+        filtered_df = filtered_df[filtered_df["match_status"].astype(str) == status_filter]
+
+    filtered_df = _filter_search(
+        filtered_df,
+        search_text,
+        [
+            "bank_narration",
+            "accounting_party_name",
+            "reference_number",
+            "transaction_number",
+            "transaction_type",
+            "match_reason",
+            "ai_summary",
+        ],
+    )
+    return _filter_min_amount(filtered_df, minimum_amount, ["bank_amount", "accounting_amount"])
 
 
 def _ai_preview_dataframe(results_df):
@@ -226,14 +436,12 @@ def _gst_preview_dataframe(results_df):
 def _gst_status_dataframe(results_df, statuses):
     """Return user-facing GST rows for selected reconciliation statuses."""
     if "match_status" not in results_df.columns:
-        return _gst_preview_dataframe(results_df)
+        return _gst_review_dataframe(results_df)
 
     status_df = results_df[results_df["match_status"].isin(statuses)].copy()
-    if statuses == ["possible_match"]:
+    if statuses == ["possible_match"] and {"gstin", "invoice_number"}.issubset(status_df.columns):
         status_df = status_df.sort_values(by=["gstin", "invoice_number"], kind="stable")
-        available_columns = [column for column in GST_POSSIBLE_MATCH_COLUMNS if column in status_df.columns]
-        return status_df.loc[:, available_columns].reset_index(drop=True)
-    return _gst_preview_dataframe(status_df)
+    return _gst_review_dataframe(status_df.reset_index(drop=True))
 
 
 def _first_available_column(df: pd.DataFrame, candidates: list[str]) -> str | None:
@@ -327,10 +535,94 @@ def _show_missing_books_analysis(results_df: pd.DataFrame) -> None:
     )
 
 
+def _show_explanation_cards(card_rows: list[tuple[str, str]]) -> None:
+    """Render short status explanations for finance reviewers."""
+    columns = st.columns(len(card_rows))
+    for column, (title, body) in zip(columns, card_rows):
+        with column:
+            st.markdown(f"**{title}**")
+            st.caption(body)
+
+
+def _show_bank_explanation_cards() -> None:
+    _show_explanation_cards(
+        [
+            ("Bank not in Books", "Bank transaction exists but no matching Zoho/books record found."),
+            ("Books not in Bank", "Zoho/books entry exists but no matching bank statement row found."),
+            ("Possible Match", "Amount/date signals exist but narration/party/reference needs review."),
+        ]
+    )
+
+
+def _show_gst_explanation_cards() -> None:
+    _show_explanation_cards(
+        [
+            ("Missing in Books", "GSTR entry exists but Zoho purchase record not found."),
+            ("Missing in GSTR", "Zoho record exists but GSTR upload does not show it."),
+            ("Tax Type Mismatch", "GST tax split differs, e.g. IGST vs CGST/SGST."),
+            ("Amount Mismatch", "GSTIN/invoice match exists but amount/tax differs."),
+        ]
+    )
+
+
+def _show_bank_action_summary(dataframe: pd.DataFrame) -> None:
+    """Render bank review counts and suggested order."""
+    high_count = int((dataframe["review_priority"] == "High Priority").sum()) if "review_priority" in dataframe.columns else 0
+    possible_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "possible_match").sum())
+    bank_not_books_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "bank_not_in_books").sum())
+    books_not_bank_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "books_not_in_bank").sum())
+
+    metric_columns = st.columns(4)
+    with metric_columns[0]:
+        st.metric("High risk rows", high_count)
+    with metric_columns[1]:
+        st.metric("Possible matches", possible_count)
+    with metric_columns[2]:
+        st.metric("Bank not in Books", bank_not_books_count)
+    with metric_columns[3]:
+        st.metric("Books not in Bank", books_not_bank_count)
+
+    st.markdown("**Suggested order**")
+    st.markdown(
+        "1. Review high-risk unmatched rows\n"
+        "2. Approve/reject possible matches\n"
+        "3. Check small bank charges separately\n"
+        "4. Export final exception list"
+    )
+
+
+def _show_gst_action_summary(dataframe: pd.DataFrame) -> None:
+    """Render GST review counts and suggested order."""
+    high_count = int((dataframe["review_priority"] == "High Priority").sum()) if "review_priority" in dataframe.columns else 0
+    possible_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "possible_match").sum())
+    missing_books_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "missing_in_books").sum())
+    missing_gstr_count = int((dataframe.get("match_status", pd.Series(dtype=str)) == "missing_in_gstr").sum())
+
+    metric_columns = st.columns(4)
+    with metric_columns[0]:
+        st.metric("High risk rows", high_count)
+    with metric_columns[1]:
+        st.metric("Possible matches", possible_count)
+    with metric_columns[2]:
+        st.metric("Missing in Books", missing_books_count)
+    with metric_columns[3]:
+        st.metric("Missing in GSTR", missing_gstr_count)
+
+    st.markdown("**Suggested order**")
+    st.markdown(
+        "1. Review high-risk missing and mismatch rows\n"
+        "2. Resolve tax type and amount mismatches\n"
+        "3. Approve/reject possible matches\n"
+        "4. Export final exception list"
+    )
+
+
 def _gst_technical_audit_dataframe(results_df):
     """Return GST technical audit columns with raw traceability fields."""
-    available_columns = [column for column in GST_TECHNICAL_COLUMNS if column in results_df.columns]
-    return results_df.loc[:, available_columns].copy()
+    display_df = _with_review_priority(results_df)
+    available_columns = [column for column in GST_TECHNICAL_COLUMNS if column in display_df.columns]
+    remaining = [column for column in display_df.columns if column not in available_columns]
+    return display_df.loc[:, available_columns + remaining].copy()
 
 
 def _split_ignored_opening_balances(results_df):
@@ -345,9 +637,9 @@ def _split_ignored_opening_balances(results_df):
 def _bank_status_dataframe(results_df, status: str):
     """Return bank reconciliation rows for one status."""
     if "match_status" not in results_df.columns:
-        return results_df.copy()
+        return _bank_review_dataframe(results_df)
 
-    return results_df[results_df["match_status"] == status].copy().reset_index(drop=True)
+    return _bank_review_dataframe(results_df[results_df["match_status"] == status].copy().reset_index(drop=True))
 
 
 def _friendly_timestamp(value) -> str:
@@ -480,47 +772,91 @@ with bank_tab:
             )
 
         transaction_results, opening_balance_results = _split_ignored_opening_balances(bank_result["results"])
+        bank_review_results = _bank_review_dataframe(transaction_results)
         section_card(
             "AI Insights Preview",
             body_html="<p>Review rule-based match signals and optional Vertex AI notes before opening the full bank detail.</p>",
         )
         st.caption(bank_result["message"])
         _show_ai_summary_card(bank_result, transaction_results, "Bank reconciliation")
-        st.dataframe(_ai_preview_dataframe(transaction_results), use_container_width=True, hide_index=True)
+        st.dataframe(_ai_preview_dataframe(bank_review_results), use_container_width=True, hide_index=True)
 
         section_card(
             "Bank Reconciliation Detail",
             body_html="<p>Review matched transactions and bank/books exceptions separately for faster finance follow-up.</p>",
         )
+        _show_bank_explanation_cards()
+        filtered_bank_results = _bank_filtered_dataframe(bank_review_results, "bank_detail")
+        bank_high_priority = filtered_bank_results[filtered_bank_results["review_priority"] == "High Priority"].copy()
+        bank_possible_matches = filtered_bank_results[filtered_bank_results["match_status"] == "possible_match"].copy()
+        bank_not_books = filtered_bank_results[filtered_bank_results["match_status"] == "bank_not_in_books"].copy()
+        books_not_bank = filtered_bank_results[filtered_bank_results["match_status"] == "books_not_in_bank"].copy()
+        bank_unmatched = filtered_bank_results[
+            filtered_bank_results["match_status"].isin(["bank_not_in_books", "books_not_in_bank"])
+        ].copy()
+        bank_matched = filtered_bank_results[filtered_bank_results["match_status"] == "matched"].copy()
         (
+            bank_action_tab,
+            bank_high_tab,
+            bank_possible_tab,
             bank_not_books_tab,
             books_not_bank_tab,
-            bank_possible_tab,
             bank_matched_tab,
-            opening_balance_tab,
+            bank_technical_tab,
         ) = st.tabs(
             [
+                "Action Summary",
+                "High Priority",
+                "Possible Matches",
                 "Bank not in Books",
                 "Books not in Bank",
-                "Possible Match",
                 "Matched",
-                "Opening Balance",
+                "Technical Audit",
             ]
         )
+        with bank_action_tab:
+            _show_bank_action_summary(bank_review_results)
+            if not opening_balance_results.empty:
+                st.caption(f"Opening balance rows ignored from matching: {len(opening_balance_results.index)}")
         with bank_not_books_tab:
-            st.dataframe(_bank_status_dataframe(bank_result["results"], "bank_not_in_books"), use_container_width=True, hide_index=True)
+            st.dataframe(bank_not_books, use_container_width=True, hide_index=True)
         with books_not_bank_tab:
-            st.dataframe(_bank_status_dataframe(bank_result["results"], "books_not_in_bank"), use_container_width=True, hide_index=True)
+            st.dataframe(books_not_bank, use_container_width=True, hide_index=True)
         with bank_possible_tab:
-            st.dataframe(_bank_status_dataframe(bank_result["results"], "possible_match"), use_container_width=True, hide_index=True)
+            st.dataframe(bank_possible_matches, use_container_width=True, hide_index=True)
+        with bank_high_tab:
+            st.dataframe(bank_high_priority, use_container_width=True, hide_index=True)
         with bank_matched_tab:
-            st.dataframe(_bank_status_dataframe(bank_result["results"], "matched"), use_container_width=True, hide_index=True)
-        with opening_balance_tab:
-            st.dataframe(opening_balance_results, use_container_width=True, hide_index=True)
+            st.dataframe(bank_matched, use_container_width=True, hide_index=True)
+        with bank_technical_tab:
+            st.dataframe(_bank_technical_dataframe(bank_result["results"]), use_container_width=True, hide_index=True)
 
         export_path = Path(bank_result["export_path"])
         file_summary_card(export_path.name, "Bank Reconciliation")
-        _download_excel_button("Download Bank Results", export_path)
+        export_columns = st.columns(4)
+        with export_columns[0]:
+            _download_excel_button("Download full reconciliation", export_path, key="bank_full_reconciliation_download")
+        with export_columns[1]:
+            _download_dataframe_button(
+                "Download high priority exceptions",
+                bank_high_priority,
+                "bank_high_priority_exceptions.xlsx",
+                key="bank_high_priority_download",
+            )
+        with export_columns[2]:
+            _download_dataframe_button(
+                "Download possible matches",
+                bank_possible_matches,
+                "bank_possible_matches.xlsx",
+                key="bank_possible_matches_download",
+            )
+        with export_columns[3]:
+            _download_dataframe_button(
+                "Download bank/books unmatched exceptions",
+                bank_unmatched,
+                "bank_books_unmatched_exceptions.xlsx",
+                key="bank_unmatched_download",
+            )
     elif bank_error:
         section_card(
             "Bank Reconciliation Not Completed",
@@ -614,11 +950,18 @@ with gst_tab:
         with summary_columns[6]:
             metric_card("Missing in books", str(gst_summary["missing_in_books"]), caption="Upload not in books", status="Error", icon="MB")
 
+        gst_review_results = _gst_review_dataframe(gst_result["results"])
+        gst_high_priority = gst_review_results[gst_review_results["review_priority"] == "High Priority"].copy()
+        gst_possible_matches = _gst_status_dataframe(gst_result["results"], ["possible_match"])
+        gst_missing = gst_review_results[
+            gst_review_results["match_status"].isin(["missing_in_books", "missing_in_gstr"])
+        ].copy()
         st.caption(gst_result["message"])
         _show_ai_summary_card(gst_result, gst_result["results"], "GST reconciliation")
 
         (
-            summary_tab,
+            gst_action_tab,
+            gst_high_tab,
             tax_type_tab,
             amount_tab,
             missing_books_tab,
@@ -628,7 +971,8 @@ with gst_tab:
             technical_tab,
         ) = st.tabs(
             [
-                "Summary",
+                "Action Summary",
+                "High Priority",
                 "Tax type mismatch",
                 "Amount mismatches",
                 "Missing in books",
@@ -639,7 +983,9 @@ with gst_tab:
             ]
         )
 
-        with summary_tab:
+        with gst_action_tab:
+            _show_gst_explanation_cards()
+            _show_gst_action_summary(gst_review_results)
             period_text = f"{gst_result.get('selected_upload_min_date', '')} to {gst_result.get('selected_upload_max_date', '')}"
             summary_rows = pd.DataFrame(
                 [
@@ -655,18 +1001,8 @@ with gst_tab:
                 ]
             )
             st.dataframe(summary_rows, use_container_width=True, hide_index=True)
-            st.dataframe(
-                pd.DataFrame(
-                    [
-                        {"Status": "Missing in GSTR", "Explanation": "Books bill not found in uploaded GSTR"},
-                        {"Status": "Missing in Books", "Explanation": "GSTR invoice not found in Zoho/books"},
-                        {"Status": "Tax Type Mismatch", "Explanation": "Total matches but IGST/CGST/SGST breakup differs"},
-                        {"Status": "Possible Match", "Explanation": "Likely same invoice but needs manual review"},
-                    ]
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
+        with gst_high_tab:
+            st.dataframe(gst_high_priority, use_container_width=True, hide_index=True)
 
         with tax_type_tab:
             st.dataframe(
@@ -682,7 +1018,7 @@ with gst_tab:
         with missing_gstr_tab:
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["missing_in_gstr"]), use_container_width=True, hide_index=True)
         with possible_tab:
-            st.dataframe(_gst_status_dataframe(gst_result["results"], ["possible_match"]), use_container_width=True, hide_index=True)
+            st.dataframe(gst_possible_matches, use_container_width=True, hide_index=True)
         with matched_tab:
             st.dataframe(_gst_status_dataframe(gst_result["results"], ["matched"]), use_container_width=True, hide_index=True)
         with technical_tab:
@@ -690,7 +1026,30 @@ with gst_tab:
 
         export_path = Path(gst_result["export_path"])
         file_summary_card(export_path.name, "GST Reconciliation")
-        _download_excel_button("Download GST Results", export_path)
+        export_columns = st.columns(4)
+        with export_columns[0]:
+            _download_excel_button("Download full reconciliation", export_path, key="gst_full_reconciliation_download")
+        with export_columns[1]:
+            _download_dataframe_button(
+                "Download high priority exceptions",
+                gst_high_priority,
+                "gst_high_priority_exceptions.xlsx",
+                key="gst_high_priority_download",
+            )
+        with export_columns[2]:
+            _download_dataframe_button(
+                "Download possible matches",
+                gst_possible_matches,
+                "gst_possible_matches.xlsx",
+                key="gst_possible_matches_download",
+            )
+        with export_columns[3]:
+            _download_dataframe_button(
+                "Download missing exceptions",
+                gst_missing,
+                "gst_missing_exceptions.xlsx",
+                key="gst_missing_download",
+            )
     elif gst_error:
         section_card(
             "GST Reconciliation Not Completed",
