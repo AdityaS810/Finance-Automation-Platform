@@ -95,6 +95,6 @@ with report_card_columns[1]:
 if mis_result:
     section_card(
         "Monthly MIS Preview",
-        body_html="<p>Preview rows from <strong>finance_gold.mis_monthly_pl</strong> used to reconcile the formatted MIS workbook.</p>",
+        body_html="<p>Preview the line-item values written into the CEO-format MIS workbook from Zoho and BigQuery-backed data.</p>",
     )
     st.dataframe(mis_result["monthly_preview"], use_container_width=True, hide_index=True)
