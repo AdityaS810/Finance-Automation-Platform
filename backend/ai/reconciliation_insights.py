@@ -20,9 +20,9 @@ MAX_AI_ROWS = 20
 STRONG_BANK_MATCH_THRESHOLD = 0.78
 AI_UNAVAILABLE_MESSAGE = "Vertex AI insights unavailable. Showing rule-based reconciliation only."
 AI_COLUMNS = ["ai_summary", "ai_recommendation", "ai_risk_level"]
-MIN_SUMMARY_WORDS = 8
-MAX_SUMMARY_WORDS = 30
-MAX_RECOMMENDATION_WORDS = 25
+MIN_SUMMARY_WORDS = 12
+MAX_SUMMARY_WORDS = 35
+MAX_RECOMMENDATION_WORDS = 29
 
 
 def add_bank_ai_insights(results_df: pd.DataFrame, max_rows: int = MAX_AI_ROWS) -> tuple[pd.DataFrame, dict]:
@@ -131,7 +131,7 @@ def _bank_uncertain_indexes(dataframe: pd.DataFrame) -> pd.DataFrame:
     return dataframe[
         (status != "ignored_opening_balance")
         & (
-            status.isin(["possible_match", "unmatched"])
+            status.isin(["possible_match", "unmatched", "bank_not_in_books", "books_not_in_bank"])
             | (confidence < STRONG_BANK_MATCH_THRESHOLD)
         )
     ]
@@ -141,7 +141,16 @@ def _gst_exception_indexes(dataframe: pd.DataFrame) -> pd.DataFrame:
     """Select GST rows where Gemini can help explain a review decision."""
     status = dataframe.get("match_status", pd.Series("", index=dataframe.index)).astype(str)
     exceptions_df = dataframe[
-        status.isin(["amount_mismatch", "mismatch", "possible_match", "missing_in_books", "missing_in_gstr"])
+        status.isin(
+            [
+                "amount_mismatch",
+                "mismatch",
+                "tax_component_mismatch",
+                "possible_match",
+                "missing_in_books",
+                "missing_in_gstr",
+            ]
+        )
     ]
     dedupe_columns = [
         column_name
@@ -173,20 +182,33 @@ def _bank_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
     status = _row_text(row, "match_status").lower()
     amount_difference = _amount_difference_from_reason(reason) or _bank_amount_difference(row)
     date_difference = _date_difference_from_reason(reason) or _bank_date_difference(row)
+    status_label = f"status {status}" if status else "bank exception"
+    bank_amount = _numeric_value(_row_value(row, "bank_amount"))
+    accounting_amount = _numeric_value(_row_value(row, "accounting_amount"))
 
-    if "no accounting" in reason_lower or status == "unmatched":
-        return "No accounting record matched this bank line, so the transaction needs manual review."
+    if status == "bank_not_in_books" or "no accounting" in reason_lower or status == "unmatched":
+        amount_text = f" for {bank_amount:.2f}" if bank_amount is not None else ""
+        return (
+            f"{status_label} bank line{amount_text} has no accounting match; narration, party, or reference evidence is insufficient."
+        )
+    if status == "books_not_in_bank":
+        amount_text = f" for {accounting_amount:.2f}" if accounting_amount is not None else ""
+        return (
+            f"{status_label} accounting entry{amount_text} has no bank line; check if it belongs to another period or account."
+        )
     if amount_difference is not None and amount_difference > 0 and "weak" in reason_lower:
-        return f"Amount differs by {amount_difference:.2f} and narration/party similarity is weak, so this needs review."
+        return (
+            f"{status_label} shows amount difference {amount_difference:.2f} with weak narration, party, or reference similarity."
+        )
     if amount_difference is not None and amount_difference > 0:
-        return f"Amount differs by {amount_difference:.2f} between bank and accounting records, so this needs review."
+        return f"{status_label} shows amount difference {amount_difference:.2f} between bank and accounting records."
     if date_difference is not None and date_difference > 0 and "date differs" in reason_lower:
-        return f"Transaction dates differ by {date_difference} day(s), so confirm timing before approval."
+        return f"{status_label} has a {date_difference} day date gap; verify whether this is timing or the wrong voucher."
     if "weak" in reason_lower or "similarity" in reason_lower:
-        return "Narration or party similarity is weak, so verify the bank line against the ledger."
+        return f"{status_label} has weak narration, party, or reference similarity despite partial amount/date signals."
     if status == "possible_match":
-        return "Amount, date, or party signals are only a possible match, so this needs review."
-    return "Rule-based checks found a bank amount, date, or party issue that needs review."
+        return f"{status_label} has reviewable amount/date signals but weak narration, party, or reference support."
+    return f"{status_label} needs review because bank amount, date, narration, party, or reference signals are incomplete."
 
 
 def _bank_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str:
@@ -196,15 +218,19 @@ def _bank_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str
     amount_difference = _amount_difference_from_reason(reason_lower) or _bank_amount_difference(row)
     date_difference = _date_difference_from_reason(reason_lower) or _bank_date_difference(row)
 
-    if "no accounting" in reason_lower or status == "unmatched":
-        return "Trace the bank line to source vouchers before approval."
+    if status == "bank_not_in_books" or "no accounting" in reason_lower or status == "unmatched":
+        return "Create missing Zoho payment or expense entry if the bank debit or receipt is genuine."
+    if status == "books_not_in_bank":
+        return "Check whether this accounting entry cleared in another bank account, period, or grouped settlement."
+    if "salary" in reason_lower or "tax" in reason_lower or "charge" in reason_lower or "transfer" in reason_lower:
+        return "Check whether this is salary, tax, bank charge, or internal transfer before posting."
     if "weak" in reason_lower or "similarity" in reason_lower:
-        return "Verify bank narration against voucher and party ledger."
+        return "Verify bank narration against Zoho voucher and approve only if party or reference matches."
     if date_difference and date_difference > 0:
-        return "Confirm whether this is a timing difference or duplicate entry."
+        return "Confirm whether the date gap is normal clearing timing or a duplicate/wrong voucher."
     if amount_difference and amount_difference > 0:
-        return "Compare bank amount with voucher and party ledger."
-    return "Review manually before final approval."
+        return "Compare bank amount with voucher total, bank charges, TDS, or grouped settlement lines."
+    return "Review party, reference, voucher, and bank narration before final approval."
 
 
 def _gst_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
@@ -215,39 +241,43 @@ def _gst_fallback_summary(row: pd.Series | dict[str, Any] | None) -> str:
     match_level = _row_text(row, "match_level").upper()
     tax_difference = _gst_tax_difference(row)
     taxable_difference = _gst_taxable_difference(row)
+    component_difference = _gst_component_difference(row)
     invoice_number = _row_text(row, "invoice_number") or "this invoice"
+    gstin = _row_text(row, "gstin") or _row_text(row, "zoho_gstin") or _row_text(row, "gstr_gstin") or "GSTIN unavailable"
     supplier_name = _row_text(row, "supplier_name") or _row_text(row, "party_name") or "the supplier"
-    amount_difference = max(tax_difference or 0, taxable_difference or 0)
+    amount_difference = max(tax_difference or 0, taxable_difference or 0, component_difference or 0)
 
     if status == "missing_in_books" or "no accounting" in reason_lower:
-        return f"Invoice {invoice_number} from {supplier_name} is present in GSTR but missing in books."
+        return f"missing_in_books invoice {invoice_number} for {gstin} is in GSTR but absent from books."
     if status == "missing_in_gstr" or "not found in uploaded gstr" in reason_lower:
-        return f"Invoice {invoice_number} exists in books but is missing from the uploaded GSTR report."
+        return f"missing_in_gstr invoice {invoice_number} for {supplier_name} exists in books but not the uploaded GSTR."
     if status == "matched":
         return f"Invoice {invoice_number} matches between books and GSTR with no tax difference."
+    if status == "tax_component_mismatch":
+        return f"tax_component_mismatch invoice {invoice_number} has matching value but IGST, CGST, or SGST classification differs."
     if status in {"amount_mismatch", "mismatch"} and amount_difference > 0:
-        return f"Invoice {invoice_number} matched by GSTIN and invoice number, but values differ by {amount_difference:.2f}."
+        return f"{status} invoice {invoice_number} matched GSTIN/invoice signals but amount or tax differs by {amount_difference:.2f}."
     if status == "possible_match" and match_level == "P4_WEAK_INVOICE":
-        return f"Invoice {invoice_number} exists in GSTR, but GSTIN, date, value, or formatting needs review."
+        return f"possible_match invoice {invoice_number} has GSTIN, date, amount, or invoice-format weakness."
     if status == "possible_match" and match_level.startswith("P6_SAFEGUARD"):
-        return f"Invoice {invoice_number} has evidence in the selected GSTR upload and should not be treated as missing without review."
+        return f"possible_match invoice {invoice_number} has selected-upload evidence but needs GSTIN, invoice, date, or amount review."
     if status == "possible_match" and match_level == "P3_FORMAT":
-        return f"Invoice {invoice_number} matched after invoice-number formatting cleanup and needs review."
+        return f"possible_match invoice {invoice_number} matched after invoice-number formatting cleanup; confirm GSTIN, date, and amount."
     if status == "possible_match" and match_level == "P5_AMOUNT_DATE_CANDIDATE":
-        return f"Invoice {invoice_number} is an amount, nearby-date, and supplier-name candidate requiring manual review."
+        return f"possible_match invoice {invoice_number} has amount, nearby-date, and supplier-name signals but weak invoice/GSTIN support."
     if status == "possible_match":
-        return f"Invoice {invoice_number} has a similar invoice-number candidate and needs manual review."
+        return f"possible_match invoice {invoice_number} has partial GSTIN, invoice, date, amount, or tax evidence."
     if "gstin" in reason_lower and "invoice" not in reason_lower:
-        return "GSTIN details do not align between records, so this invoice needs review."
+        return f"GSTIN signal is weak for invoice {invoice_number}, so books and GSTR party identity need review."
     if "invoice" in reason_lower and "matched" not in reason_lower:
-        return "Invoice number details do not align between records, so this needs review."
+        return f"Invoice number signal is weak for {invoice_number}, though GSTIN/date/amount may still indicate a candidate."
     if tax_difference is not None and tax_difference > 0:
-        return f"Tax amount differs by {tax_difference:.2f} between GSTR and books, so this needs review."
+        return f"Tax amount differs by {tax_difference:.2f} between GSTR and books for invoice {invoice_number}."
     if taxable_difference is not None and taxable_difference > 0:
-        return f"Taxable value differs by {taxable_difference:.2f} between GSTR and books, so this needs review."
+        return f"Taxable value differs by {taxable_difference:.2f} between GSTR and books for invoice {invoice_number}."
     if "tax amount" in reason_lower or "tax amounts differ" in reason_lower:
-        return "GSTIN and invoice number match, but tax amounts differ, so this needs review."
-    return "Rule-based checks found a GST invoice or tax value issue that needs review."
+        return f"GSTIN and invoice number match for {invoice_number}, but tax amounts differ."
+    return f"GST exception for invoice {invoice_number} needs review across GSTIN, invoice, date, amount, or tax signals."
 
 
 def _gst_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str:
@@ -255,23 +285,27 @@ def _gst_fallback_recommendation(row: pd.Series | dict[str, Any] | None) -> str:
     status = _row_text(row, "match_status").lower()
     match_level = _row_text(row, "match_level").upper()
     reason_lower = _row_text(row, "match_reason").lower()
-    if status in {"missing_in_books", "missing_in_gstr"}:
-        return "Confirm whether this is a timing difference or duplicate entry."
+    if status == "missing_in_books":
+        return "Record the missing purchase bill in Zoho if the GSTR entry is valid."
+    if status == "missing_in_gstr":
+        return "Verify supplier invoice number and GSTIN before claiming or following up on ITC."
+    if status == "tax_component_mismatch":
+        return "Check CGST/SGST versus IGST classification and place of supply before filing."
     if status == "possible_match":
         if match_level == "P4_WEAK_INVOICE":
-            return "Compare GSTIN, invoice date, and values before treating this as reconciled."
+            return "Compare GSTIN, invoice date, invoice number, and values before treating this as reconciled."
         if match_level.startswith("P6_SAFEGUARD"):
             return "Review the candidate GSTR row against Zoho/books before taking filing action."
         if match_level == "P3_FORMAT":
-            return "Confirm formatted invoice number against source documents."
+            return "Confirm formatted invoice number against source documents and supplier GSTIN."
         if match_level == "P5_AMOUNT_DATE_CANDIDATE":
-            return "Compare source invoice, books record, and GSTR row."
-        return "Confirm invoice number against source documents before matching."
+            return "Compare source invoice, books record, GSTR row, and supplier GSTIN."
+        return "Confirm invoice number, GSTIN, date, and values before matching."
     if "invoice" in reason_lower or "tax" in reason_lower or status in {"amount_mismatch", "mismatch"}:
-        return "Check invoice number and tax values before filing."
+        return "Check invoice number, taxable value, and tax amounts before filing."
     if "gstin" in reason_lower:
         return "Verify GSTIN against vendor master and source invoice."
-    return "Review manually before final approval."
+    return "Review GSTIN, invoice number, date, taxable value, and tax breakup before filing."
 
 
 def _bank_prompt(row: pd.Series) -> str:
@@ -283,8 +317,13 @@ def _bank_prompt(row: pd.Series) -> str:
         "accounting_date": _safe_value(row.get("accounting_date")),
         "accounting_party_name": _safe_value(row.get("accounting_party_name")),
         "accounting_amount": _safe_value(row.get("accounting_amount")),
+        "reference_number": _safe_value(row.get("reference_number")),
+        "transaction_number": _safe_value(row.get("transaction_number")),
+        "transaction_type": _safe_value(row.get("transaction_type")),
+        "confidence_score": _safe_value(row.get("confidence_score")),
         "rule_based_match_status": _safe_value(row.get("match_status")),
         "rule_based_match_reason": _safe_value(row.get("match_reason")),
+        "action_required": _safe_value(row.get("action_required")),
     }
     return _prompt_from_context("bank reconciliation exception", context)
 
@@ -294,39 +333,68 @@ def _gst_prompt(row: pd.Series) -> str:
     context = {
         "GSTIN": _safe_value(row.get("gstin")),
         "invoice_number": _safe_value(row.get("invoice_number")),
+        "invoice_date": _safe_value(row.get("invoice_date")),
+        "zoho_invoice_date": _safe_value(row.get("zoho_invoice_date")),
+        "gstr_invoice_date": _safe_value(row.get("gstr_invoice_date")),
         "taxable_value_gstr": _safe_value(row.get("taxable_value_gstr")),
         "taxable_value_books": _safe_value(row.get("taxable_value_books")),
         "tax_amount_gstr": _safe_value(row.get("tax_amount_gstr")),
         "tax_amount_books": _safe_value(row.get("tax_amount_books")),
+        "igst_gstr": _safe_value(row.get("igst_gstr")),
+        "igst_books": _safe_value(row.get("igst_books")),
+        "cgst_gstr": _safe_value(row.get("cgst_gstr")),
+        "cgst_books": _safe_value(row.get("cgst_books")),
+        "sgst_gstr": _safe_value(row.get("sgst_gstr")),
+        "sgst_books": _safe_value(row.get("sgst_books")),
+        "invoice_value_gstr": _safe_value(row.get("invoice_value_gstr")),
+        "invoice_value_books": _safe_value(row.get("invoice_value_books")),
         "rule_based_match_level": _safe_value(row.get("match_level")),
         "rule_based_match_status": _safe_value(row.get("match_status")),
         "rule_based_match_reason": _safe_value(row.get("match_reason")),
+        "action_required": _safe_value(row.get("action_required")),
     }
     return _prompt_from_context("GST reconciliation exception", context)
 
 
 def _prompt_from_context(exception_type: str, context: dict[str, Any]) -> str:
     """Create a strict JSON prompt that keeps Gemini in explanation mode."""
+    bank_guidance = (
+        "For bank reconciliation, write like a finance reviewer. The summary must mention match_status, "
+        "amount/date signal if available, narration/party/reference weakness, and whether it appears to be "
+        "missing booking, missing bank entry, or a reviewable possible match. Recommendations should name "
+        "the next finance action, such as verifying bank narration against Zoho voucher, creating a missing "
+        "payment/expense entry, or checking salary, tax, bank charge, or internal transfer treatment."
+    )
+    gst_guidance = (
+        "For GST reconciliation, write like a GST reviewer. The summary must mention GSTIN/invoice/date/"
+        "amount/tax component signal when available and identify missing_in_books, missing_in_gstr, "
+        "tax_component_mismatch, amount_mismatch, or possible_match. Recommendations should name the next "
+        "filing action, such as verifying supplier invoice/GSTIN, checking CGST/SGST versus IGST, or recording "
+        "a missing purchase bill in Zoho."
+    )
+    type_guidance = bank_guidance if exception_type.startswith("bank") else gst_guidance
     return (
-        "You explain finance reconciliation exceptions for human review. "
+        "You are writing concise finance-review notes for reconciliation exception tables. "
         "Do not calculate amounts. Do not decide the match. Do not change any "
         "finance value, date, GSTIN, invoice number, or accounting data. The "
         "rule-based match status, confidence score, and reason are the source of truth. "
         "Explain the actual row-specific reason using the supplied amount, date, "
-        "narration, party, GSTIN, invoice, or tax fields where relevant. Avoid "
-        "generic repeated wording unless two rows are truly identical.\n\n"
+        "narration, party, reference, GSTIN, invoice, or tax fields where relevant. Avoid "
+        "generic repeated wording unless two rows are truly identical. Do not mention Gemini, AI, model, or prompt.\n\n"
         f"Exception type: {exception_type}\n"
+        f"Review guidance: {type_guidance}\n"
         f"Limited context JSON: {json.dumps(context, ensure_ascii=True)}\n\n"
         "Return strict JSON only. Do not wrap it in markdown fences. Do not add prose. "
         "Use exactly these keys: ai_summary, ai_recommendation, ai_risk_level. "
-        "ai_summary must be one full sentence between 8 and 30 words. It must mention "
+        "ai_summary must be one full sentence between 12 and 35 words. It must mention "
         "at least one concrete reason from the row, such as amount difference, date "
         "difference, weak narration or party similarity, missing accounting record, "
-        "GSTIN mismatch, invoice mismatch, or tax amount difference. "
-        "ai_recommendation must be specific and under 25 words. "
-        "ai_risk_level must be exactly low, medium, or high: high for large amount/date/tax "
-        "differences or missing records, medium for weak similarity or possible matches, "
-        "and low for minor rounding or timing issues."
+        "missing bank line, GSTIN mismatch, invoice mismatch, or tax amount/component difference. "
+        "ai_recommendation must be specific and under 30 words. "
+        "ai_risk_level must be exactly low, medium, or high. Risk rules: high for missing_in_books, "
+        "missing_in_gstr, bank_not_in_books, books_not_in_bank, or large amount mismatch; medium for "
+        "possible_match, amount_mismatch, or tax_component_mismatch; low only for minor formatting, "
+        "date, or reference issues."
     )
 
 
@@ -576,6 +644,23 @@ def _gst_taxable_difference(row: pd.Series | dict[str, Any] | None) -> float | N
     return abs(gstr_taxable - books_taxable)
 
 
+def _gst_component_difference(row: pd.Series | dict[str, Any] | None) -> float | None:
+    """Compute GST component difference across IGST/CGST/SGST when available."""
+    differences = []
+    for left_column, right_column in [
+        ("igst_gstr", "igst_books"),
+        ("cgst_gstr", "cgst_books"),
+        ("sgst_gstr", "sgst_books"),
+    ]:
+        left_value = _numeric_value(_row_value(row, left_column))
+        right_value = _numeric_value(_row_value(row, right_column))
+        if left_value is not None and right_value is not None:
+            differences.append(abs(left_value - right_value))
+    if not differences:
+        return None
+    return sum(differences)
+
+
 def _risk_level_from_row(row: pd.Series | dict[str, Any] | None, reconciliation_type: str) -> str:
     """Set risk from deterministic exception size and type."""
     reason_lower = _row_text(row, "match_reason").lower()
@@ -584,9 +669,17 @@ def _risk_level_from_row(row: pd.Series | dict[str, Any] | None, reconciliation_
         return "high"
 
     if reconciliation_type == "gst":
-        if status == "possible_match":
+        if status in {"missing_in_books", "missing_in_gstr"}:
+            return "high"
+        amount_difference = max(
+            _gst_tax_difference(row) or 0,
+            _gst_taxable_difference(row) or 0,
+            _gst_component_difference(row) or 0,
+        )
+        if status in {"possible_match", "amount_mismatch", "tax_component_mismatch"}:
+            if amount_difference >= 1000:
+                return "high"
             return "medium"
-        amount_difference = max(_gst_tax_difference(row) or 0, _gst_taxable_difference(row) or 0)
         if amount_difference >= 1000:
             return "high"
         if amount_difference > 1:
