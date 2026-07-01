@@ -56,5 +56,9 @@ def fetch_expenses() -> list[dict]:
     return detailed_expenses
 
 
+def fetch_customer_payments() -> list[dict]:
+    return fetch_paginated("customerpayments", "customer_payments")
+
+
 def fetch_journals() -> list[dict]:
     return fetch_paginated("journals", "journals")

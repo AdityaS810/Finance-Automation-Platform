@@ -749,7 +749,7 @@ WITH parsed AS (
     SAFE_CAST(JSON_VALUE(raw_json, '$.unused_amount') AS NUMERIC) AS unused_amount,
     loaded_at
   FROM `finance_bronze.zoho_raw`
-  WHERE entity_name = 'customer_payments'
+  WHERE entity_name IN ('customer_payments', 'customerpayments')
 )
 SELECT
   parsed.*,
