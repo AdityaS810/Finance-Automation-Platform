@@ -416,6 +416,107 @@ def test_bank_reconciliation_matches_and_exports_excel(workspace_tmp_path):
     assert result["export_path"].exists()
 
 
+def test_bank_reconciliation_deduplicates_accounting_books_only_rows(workspace_tmp_path):
+    bank_df = pd.DataFrame(
+        [
+            {
+                "bank_line_id": "bank-unique",
+                "upload_id": "bank-upload-dup-test",
+                "bank_date": "2026-01-10",
+                "bank_narration": "Unrelated bank receipt",
+                "debit_amount": 0,
+                "credit_amount": 1,
+                "balance_amount": 1,
+                "bank_amount": 1,
+            }
+        ]
+    )
+    accounting_df = pd.DataFrame(
+        [
+            {
+                "accounting_record_id": "acct-razorpay-70000",
+                "source_record_id": "zoho-payment-1",
+                "source_line_id": "line-1",
+                "source_type": "payment",
+                "accounting_date": "2026-01-10",
+                "accounting_party_name": "Payment to Razopay",
+                "reference_number": "RAZORPAY-70000",
+                "transaction_number": "PAY-1",
+                "transaction_type": "vendor_payment",
+                "accounting_amount": -70000,
+            },
+            {
+                "accounting_record_id": "acct-razorpay-70000",
+                "source_record_id": "zoho-payment-1",
+                "source_line_id": "line-1",
+                "source_type": "payment",
+                "accounting_date": "2026-01-10",
+                "accounting_party_name": "Payment to Razopay",
+                "reference_number": "RAZORPAY-70000",
+                "transaction_number": "PAY-1",
+                "transaction_type": "vendor_payment",
+                "accounting_amount": -70000,
+            },
+        ]
+    )
+
+    result = run_bank_reconciliation(
+        workspace_tmp_path,
+        bank_lines_df=bank_df,
+        accounting_df=accounting_df,
+        generate_ai_insights=False,
+    )
+
+    books_only_rows = result["results"][result["results"]["match_status"] == "books_not_in_bank"]
+    assert len(books_only_rows.index) == 1
+    assert books_only_rows["accounting_record_id"].tolist() == ["acct-razorpay-70000"]
+
+
+def test_bank_reconciliation_bank_charge_opposite_sign_is_review_match(workspace_tmp_path):
+    bank_df = pd.DataFrame(
+        [
+            {
+                "bank_line_id": "bank-charge-1",
+                "upload_id": "bank-upload-charge-test",
+                "bank_date": "2026-01-28",
+                "bank_narration": "Balance Based Chgs",
+                "debit_amount": 5000,
+                "credit_amount": 0,
+                "balance_amount": 100000,
+                "bank_amount": -5000,
+            }
+        ]
+    )
+    accounting_df = pd.DataFrame(
+        [
+            {
+                "accounting_record_id": "acct-bank-charge-1",
+                "accounting_date": "2026-01-31",
+                "accounting_party_name": "Bank Charges",
+                "reference_number": "BANK-CHARGE",
+                "transaction_number": "JRN-1",
+                "transaction_type": "journal",
+                "accounting_amount": 5000,
+            }
+        ]
+    )
+
+    result = run_bank_reconciliation(
+        workspace_tmp_path,
+        bank_lines_df=bank_df,
+        accounting_df=accounting_df,
+        generate_ai_insights=False,
+    )
+
+    row = result["results"].iloc[0]
+    assert row["match_status"] == "possible_match"
+    assert row["accounting_record_id"] == "acct-bank-charge-1"
+    assert row["confidence_score"] < 0.78
+    assert "absolute value" in row["match_reason"]
+    assert result["summary"]["books_not_in_bank"] == 0
+    assert result["summary"]["bank_not_in_books"] == 0
+
+
 def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_path):
     result = run_gst_reconciliation(
         workspace_tmp_path,
