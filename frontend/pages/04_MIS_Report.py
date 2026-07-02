@@ -119,6 +119,7 @@ mis_result = st.session_state.get("mis_report_result")
 mis_error = st.session_state.get("mis_report_error")
 
 if mis_result:
+    metrics = mis_result.get("metrics") or {}
     metric_items = [
         ("Revenue", mis_result["metrics"]["Revenue"], "Selected reporting window", "Success", "RV"),
         ("Expenses", mis_result["metrics"]["Expenses"], "Selected reporting window", "Warning", "EX"),

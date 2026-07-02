@@ -1,4 +1,4 @@
-"""Generate the CEO-format MIS workbook from BigQuery and Zoho detail data."""
+"""Generate the company MIS workbook from BigQuery and Zoho detail data."""
 
 from __future__ import annotations
 
