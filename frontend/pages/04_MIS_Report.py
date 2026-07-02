@@ -52,15 +52,16 @@ mis_result = st.session_state.get("mis_report_result")
 mis_error = st.session_state.get("mis_report_error")
 
 if mis_result:
+    metrics = mis_result.get("metrics") or {}
     metric_items = [
-        ("Revenue", mis_result["metrics"]["Revenue"], "Gold monthly P&L", "Success", "RV"),
-        ("Expenses", mis_result["metrics"]["Expenses"], "Gold monthly P&L", "Warning", "EX"),
-        ("Profit", mis_result["metrics"]["Profit"], "Revenue less expenses", "Success", "PF"),
-        ("Currency", mis_result["metrics"]["Reporting Currency"], "Consolidated reporting", "Info", "INR"),
-        ("Journal Adjustments", mis_result["metrics"]["Journal Adjustments"], "Gold journal totals", "Info", "JA"),
-        ("Invoices", mis_result["metrics"]["Invoices"], "Dashboard KPI count", "Info", "IN"),
-        ("Bills", mis_result["metrics"]["Bills"], "Dashboard KPI count", "Info", "BL"),
-        ("Contacts", mis_result["metrics"]["Contacts"], "Dashboard KPI count", "Info", "CT"),
+        ("Revenue", metrics.get("Revenue", 0), "Gold monthly P&L", "Success", "RV"),
+        ("Expenses", metrics.get("Expenses", 0), "Gold monthly P&L", "Warning", "EX"),
+        ("Profit", metrics.get("Profit", 0), "Revenue less expenses", "Success", "PF"),
+        ("Currency", metrics.get("Reporting Currency", "INR"), "Consolidated reporting", "Info", "INR"),
+        ("Journal Adjustments", metrics.get("Journal Adjustments", 0), "Gold journal totals", "Info", "JA"),
+        ("Invoices", metrics.get("Invoices", 0), "Dashboard KPI count", "Info", "IN"),
+        ("Bills", metrics.get("Bills", 0), "Dashboard KPI count", "Info", "BL"),
+        ("Contacts", metrics.get("Contacts", 0), "Dashboard KPI count", "Info", "CT"),
     ]
 
     metric_columns = st.columns(4)
@@ -107,6 +108,6 @@ with report_card_columns[1]:
 if mis_result:
     section_card(
         "Monthly MIS Preview",
-        body_html="<p>Preview the line-item values written into the CEO-format MIS workbook from Zoho and BigQuery-backed data.</p>",
+        body_html="<p>Preview the line-item values written into the company MIS workbook from Zoho and BigQuery-backed data.</p>",
     )
     st.dataframe(mis_result["monthly_preview"], use_container_width=True, hide_index=True)

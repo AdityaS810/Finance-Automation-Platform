@@ -1,4 +1,4 @@
-"""Generate the CEO-format MIS workbook from BigQuery and Zoho detail data."""
+"""Generate the company MIS workbook from BigQuery and Zoho detail data."""
 
 from __future__ import annotations
 
@@ -311,14 +311,17 @@ def fetch_gold_mis_data(project_id: str | None = None, org_filter: str | None = 
     return monthly_pl_df, dashboard_summary_df
 
 
-def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+def fetch_detailed_mis_data(
+    project_id: str | None = None,
+    org_filter: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Fetch latest invoice, bill, and journal raw payloads for MIS classification."""
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
     selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
-    org_filter_sql = "" if selected_org_key == "all" else f"WHERE source_org_key = '{selected_org_key}'"
+    org_filter_sql = "" if selected_org_key == "all" else f"AND source_org_key = '{selected_org_key}'"
 
     invoice_query = f"""
         WITH latest AS (
@@ -329,6 +332,7 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'invoices'
+                {org_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -355,6 +359,7 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'bills'
+                {org_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -380,6 +385,7 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'journals'
+                {org_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -1116,7 +1122,7 @@ def generate_mis_report(
     invoices_df: pd.DataFrame | None = None,
     journals_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
-    """Generate the CEO-format MIS workbook from detailed Zoho/BigQuery data."""
+    """Generate the company MIS workbook from detailed Zoho/BigQuery data."""
     template_path = _template_path()
     if not template_path.exists():
         raise FileNotFoundError(f"MIS template workbook not found at {template_path}")
@@ -1129,13 +1135,13 @@ def generate_mis_report(
 
     if monthly_pl_df is None or dashboard_summary_df is None:
         try:
-            monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id)
+            monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id, org_filter=org_filter)
         except Exception:
             monthly_pl_df = monthly_pl_df if monthly_pl_df is not None else pd.DataFrame()
             dashboard_summary_df = dashboard_summary_df if dashboard_summary_df is not None else pd.DataFrame()
 
     if invoices_df is None or bills_df is None or journals_df is None:
-        fetched_invoices_df, fetched_bills_df, fetched_journals_df = fetch_detailed_mis_data(project_id)
+        fetched_invoices_df, fetched_bills_df, fetched_journals_df = fetch_detailed_mis_data(project_id, org_filter=org_filter)
         invoices_df = fetched_invoices_df if invoices_df is None else invoices_df
         bills_df = fetched_bills_df if bills_df is None else bills_df
         journals_df = fetched_journals_df if journals_df is None else journals_df
@@ -1174,7 +1180,7 @@ def generate_mis_report(
     metrics = _build_metrics(financial_year, monthly_preview_df, dashboard_summary_df)
     return {
         "status": "success",
-        "message": "MIS report generated in the CEO workbook format.",
+        "message": "MIS report generated in the company MIS workbook format.",
         "metrics": metrics,
         "report_path": report_path,
         "is_placeholder": False,
