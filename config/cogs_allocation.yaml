@@ -1,25 +1,10 @@
 fx_rate_inr_per_usd: 90
-months:
-  - "2025-04"
-  - "2025-05"
-  - "2025-06"
-  - "2025-07"
-  - "2025-08"
-  - "2025-09"
-  - "2025-10"
-  - "2025-11"
-  - "2025-12"
-  - "2026-01"
-  - "2026-02"
-  - "2026-03"
 company_rules:
   techm_cogs_start: "2025-09"
   bsm_delivery_cogs_start: "2025-07"
   dorothea_cogs_start: "2025-10"
-  bonus_month: "2026-03"
   monthly_technology_cost_inr: 25800
   ramki_monthly_usd: 12500
-  run_rate_preferred_months: ["2025-10", "2025-11", "2025-12"]
 allocation_rows:
   - key: delivery_employees
     label: Delivery employees

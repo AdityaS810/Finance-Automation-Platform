@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +13,13 @@ import yaml
 from dotenv import load_dotenv
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
+
+from backend.reports.report_periods import (
+    get_fy_label,
+    get_month_periods,
+    get_selected_report_period,
+    parse_financial_year_start,
+)
 
 
 DEFAULT_PROJECT_ID = "internal-project-work-497507"
@@ -25,6 +32,7 @@ MONTHLY_TEMPLATE_SHEET = "Monthly P&L"
 QUARTERLY_TEMPLATE_SHEET = "Quarterly P&L"
 COGS_TEMPLATE_SHEET = "COGS Allocation Working"
 TEMPLATE_FILE_NAME = "MidofficeData_KeyMetrics_PL_FY2526.xlsx"
+TEMPLATE_FILE_PATTERN = "MidofficeData_KeyMetrics_PL_*.xlsx"
 
 
 load_dotenv()
@@ -35,7 +43,13 @@ def _repo_root() -> Path:
 
 
 def _template_path() -> Path:
-    return _repo_root() / "templates" / TEMPLATE_FILE_NAME
+    templates_dir = _repo_root() / "templates"
+    exact_match = templates_dir / TEMPLATE_FILE_NAME
+    if exact_match.exists():
+        return exact_match
+
+    template_matches = sorted(templates_dir.glob(TEMPLATE_FILE_PATTERN))
+    return template_matches[0] if template_matches else exact_match
 
 
 def _mis_mapping_path() -> Path:
@@ -74,9 +88,10 @@ def _normalise_org_filter(org_filter: str | None = None) -> str:
     return aliases.get(normalised, "all")
 
 
-def _financial_year_token(financial_year: str) -> str:
-    """Convert FY25-26 to FY2526 for readable output file names."""
-    return financial_year.replace("-", "").replace(" ", "").upper()
+def _financial_year_token(financial_year_start: int | str) -> str:
+    """Return a filename token like FY2025_26."""
+    start_year = parse_financial_year_start(financial_year_start)
+    return f"FY{start_year}_{str(start_year + 1)[-2:]}"
 
 
 def _utc_now_naive() -> datetime:
@@ -158,33 +173,21 @@ def _read_yaml(path: Path) -> dict[str, Any]:
 
 
 def _parse_financial_year(financial_year: str) -> tuple[int, int]:
-    cleaned = financial_year.upper().replace(" ", "")
-    if not cleaned.startswith("FY") or "-" not in cleaned:
-        raise ValueError(f"Unsupported financial year format: {financial_year}")
-
-    start_token, end_token = cleaned[2:].split("-", maxsplit=1)
-    start_year = 2000 + int(start_token)
-    end_year = 2000 + int(end_token)
-    return start_year, end_year
+    start_year = parse_financial_year_start(financial_year)
+    return start_year, start_year + 1
 
 
 def _financial_year_months(financial_year: str, configured_months: list[str] | None = None) -> list[str]:
-    if configured_months:
-        start_year, _ = _parse_financial_year(financial_year)
-        if configured_months[0].startswith(str(start_year)):
-            return configured_months
-
-    start_year, end_year = _parse_financial_year(financial_year)
-    months = [f"{start_year}-{month:02d}" for month in range(4, 13)]
-    months.extend(f"{end_year}-{month:02d}" for month in range(1, 4))
-    return months
+    del configured_months
+    start_year, _ = _parse_financial_year(financial_year)
+    return [period["key"] for period in get_month_periods(start_year)]
 
 
 def _month_labels(months: list[str]) -> dict[str, str]:
     labels = {}
     for month_key in months:
         month_date = pd.Timestamp(f"{month_key}-01")
-        labels[month_key] = month_date.strftime("%b")
+        labels[month_key] = month_date.strftime("%b %y")
     return labels
 
 
@@ -216,6 +219,40 @@ def _normalize_month(value: Any) -> str | None:
     if pd.isna(parsed):
         return None
     return parsed.strftime("%Y-%m")
+
+
+def _format_month_key(month_key: str | None) -> str:
+    """Convert YYYY-MM to a readable month label."""
+    if not month_key:
+        return "-"
+    parsed = pd.to_datetime(f"{month_key}-01", errors="coerce")
+    if pd.isna(parsed):
+        return str(month_key)
+    return parsed.strftime("%b %Y")
+
+
+def _date_to_sql(value: date | datetime) -> str:
+    """Render a date literal for BigQuery."""
+    return (value.date() if isinstance(value, datetime) else value).strftime("%Y-%m-%d")
+
+
+def _filter_dataframe_by_date_range(
+    dataframe: pd.DataFrame,
+    date_column: str,
+    start_date: date,
+    end_date: date,
+) -> pd.DataFrame:
+    """Keep only rows inside the requested date range."""
+    if dataframe.empty or date_column not in dataframe.columns:
+        return dataframe.copy()
+
+    parsed_dates = pd.to_datetime(dataframe[date_column], errors="coerce")
+    filtered = dataframe.loc[
+        parsed_dates.notna()
+        & (parsed_dates.dt.date >= start_date)
+        & (parsed_dates.dt.date <= end_date)
+    ].copy()
+    return filtered.reset_index(drop=True)
 
 
 def _to_string(value: Any) -> str:
@@ -286,39 +323,56 @@ def _convert_to_inr(amount: float, currency_code: str | None, exchange_rate: Any
     return normalized_amount
 
 
-def fetch_gold_mis_data(project_id: str | None = None, org_filter: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Query the required Gold MIS views from BigQuery."""
+def fetch_gold_mis_data(
+    project_id: str | None = None,
+    org_filter: str | None = None,
+    report_period: dict[str, Any] | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Query the Gold MIS monthly view for the requested reporting window."""
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
     selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
+    filters: list[str] = []
+    if selected_org_key != "all":
+        filters.append(f"source_org_key = '{selected_org_key}'")
+    if report_period:
+        filters.append(
+            "DATE(report_month) BETWEEN "
+            f"DATE '{_date_to_sql(report_period['start_date'])}' AND DATE '{_date_to_sql(report_period['end_date'])}'"
+        )
+    where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     monthly_query = f"""
         SELECT *
         FROM {_table_name(resolved_project_id, MIS_MONTHLY_PL_VIEW)}
-        WHERE source_org_key = '{selected_org_key}'
+        {where_clause}
         ORDER BY report_month
-    """
-    dashboard_query = f"""
-        SELECT *
-        FROM {_table_name(resolved_project_id, DASHBOARD_SUMMARY_VIEW)}
-        WHERE source_org_key = '{selected_org_key}'
     """
 
     monthly_pl_df = _query_to_dataframe(client, monthly_query)
-    dashboard_summary_df = _query_to_dataframe(client, dashboard_query)
-    return monthly_pl_df, dashboard_summary_df
+    return monthly_pl_df, pd.DataFrame()
 
 
-def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """Fetch latest invoice, bill, and journal raw payloads for MIS classification."""
+def fetch_detailed_mis_data(
+    project_id: str | None = None,
+    org_filter: str | None = None,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    """Fetch invoice, bill, and journal raw payloads for the selected reporting period."""
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
     selected_org_key = _normalise_org_filter(org_filter)
     client = bigquery.Client(project=resolved_project_id)
-    org_filter_sql = "" if selected_org_key == "all" else f"WHERE source_org_key = '{selected_org_key}'"
+    org_filter_sql = f"AND source_org_key = '{selected_org_key}'" if selected_org_key != "all" else ""
+    date_filter_sql = ""
+    if start_date and end_date:
+        start_sql = _date_to_sql(start_date)
+        end_sql = _date_to_sql(end_date)
+        date_filter_sql = f"AND SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) BETWEEN DATE '{start_sql}' AND DATE '{end_sql}'"
 
     invoice_query = f"""
         WITH latest AS (
@@ -329,6 +383,8 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'invoices'
+              {org_filter_sql}
+              {date_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -355,6 +411,8 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'bills'
+              {org_filter_sql}
+              {date_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -380,6 +438,8 @@ def fetch_detailed_mis_data(project_id: str | None = None) -> tuple[pd.DataFrame
                 raw_json
             FROM {_table_name(resolved_project_id, BRONZE_RAW_VIEW)}
             WHERE entity_name = 'journals'
+              {org_filter_sql}
+              {date_filter_sql}
             QUALIFY ROW_NUMBER() OVER (PARTITION BY source_record_id ORDER BY loaded_at DESC) = 1
         )
         SELECT
@@ -745,51 +805,74 @@ def _quarter_formula_from_cogs(cogs_columns: dict[str, int], target_months: list
     return f"=SUM('{COGS_TEMPLATE_SHEET}'!{start_letter}{start_row}:{end_letter}{end_row})"
 
 
+def _clear_range_values(worksheet, start_row: int, end_row: int, start_column: int, end_column: int) -> None:
+    """Clear a rectangular cell range without touching styles."""
+    for row_number in range(start_row, end_row + 1):
+        for column_number in range(start_column, end_column + 1):
+            worksheet.cell(row=row_number, column=column_number).value = None
+
+
+def _set_column_visibility(worksheet, start_column: int, total_slots: int, visible_slots: int) -> None:
+    """Show only the required period columns."""
+    for slot_index in range(total_slots):
+        column_letter = get_column_letter(start_column + slot_index)
+        worksheet.column_dimensions[column_letter].hidden = slot_index >= visible_slots
+
+
+def _sum_formula(column_letters: list[str], row_number: int) -> str:
+    """Build a row sum formula for one or more visible period columns."""
+    if len(column_letters) == 1:
+        return f"={column_letters[0]}{row_number}"
+    return f"=SUM({column_letters[0]}{row_number}:{column_letters[-1]}{row_number})"
+
+
 def _set_template_titles(
     quarterly_ws,
     monthly_ws,
     cogs_ws,
-    financial_year: str,
-    months: list[str],
+    report_period: dict[str, Any],
     fx_rate: float,
     company_rules: dict[str, Any],
 ) -> None:
-    start_year, end_year = _parse_financial_year(financial_year)
-    title_year = f"FY {start_year}-{str(end_year)[-2:]}"
-    quarterly_ws["B1"] = f"MIDOFFICE DATA  |  Profit & Loss Statement  |  {title_year}  (Apr {start_year} – Mar {end_year})"
+    quarter_headers = report_period["summary_headers"]
+    months = report_period["months"]
+
+    quarterly_ws["B1"] = f"MIDOFFICE DATA  |  Profit & Loss Statement  |  {report_period['header_title']}"
     quarterly_ws["B2"] = (
         "India Parent (Midoffice Data Solutions Pvt Ltd) + US Subsidiary (Midoffice Data International Inc.)"
-        f"  |  Accrual Basis  |  FX: ₹{int(fx_rate)}/USD  |  COGS: {_to_string(company_rules.get('techm_cogs_start') or '2025-09')} onwards  |  All amounts in INR (₹)"
+        f"  |  Accrual Basis  |  FX: ₹{int(fx_rate)}/USD  |  COGS: {_format_month_key(_to_string(company_rules.get('techm_cogs_start')) or '2025-09')} onwards  |  All amounts in INR (₹)"
     )
 
-    month_dates = [pd.Timestamp(f"{month_key}-01") for month_key in months]
     monthly_ws["B1"] = (
-        f"Monthly P&L Detail  |  {title_year}  |  "
-        f"{month_dates[0].strftime('%b %Y')} – {month_dates[-1].strftime('%b %Y')}  |  Automated from Zoho + BigQuery"
+        f"Monthly P&L Detail  |  {report_period['header_title']}  |  Automated from Zoho + BigQuery"
     )
     cogs_ws["B1"] = (
-        "COGS Allocation Detail  |  Delivery Staff + Vendors  |  "
-        f"TechM COGS from {_to_string(company_rules.get('techm_cogs_start') or '2025-09')}  |  "
-        f"BSM delivery from {_to_string(company_rules.get('bsm_delivery_cogs_start') or '2025-07')}"
+        f"COGS Allocation Detail  |  {report_period['header_title']}  |  "
+        f"TechM COGS from {_format_month_key(_to_string(company_rules.get('techm_cogs_start')) or '2025-09')}  |  "
+        f"BSM delivery from {_format_month_key(_to_string(company_rules.get('bsm_delivery_cogs_start')) or '2025-07')}"
     )
 
-    quarter_month_map = _quarter_months(months)
-    for column_offset, (quarter_label, quarter_month_keys) in enumerate(quarter_month_map.items(), start=3):
-        start_month = pd.Timestamp(f"{quarter_month_keys[0]}-01")
-        end_month = pd.Timestamp(f"{quarter_month_keys[-1]}-01")
-        quarterly_ws.cell(4, column_offset).value = f"{quarter_label}\n({start_month.strftime('%b')}–{end_month.strftime('%b %y')})"
+    for column_offset in range(3, 7):
+        quarterly_ws.cell(4, column_offset).value = None
+    for column_offset, header_label in enumerate(quarter_headers, start=3):
+        quarterly_ws.cell(4, column_offset).value = header_label
 
-    quarterly_ws["G4"] = f"FY\n{start_year}-{str(end_year)[-2:]}"
+    quarterly_ws["G4"] = report_period["total_column_label"]
     quarterly_ws["H4"] = "% Rev"
 
-    labels = _month_labels(months)
-    month_start_columns = _month_column_map(3, months)
-    for month_key, column_number in month_start_columns.items():
-        monthly_ws.cell(3, column_number).value = labels[month_key]
+    for column_number in range(3, 15):
+        monthly_ws.cell(3, column_number).value = None
+    for column_number, month_period in enumerate(months, start=3):
+        monthly_ws.cell(3, column_number).value = month_period["label"]
 
-    cogs_month_columns = _month_column_map(5, months)
-    for month_key, column_number in cogs_month_columns.items():
-        cogs_ws.cell(3, column_number).value = labels[month_key]
+    for column_number in range(5, 17):
+        cogs_ws.cell(3, column_number).value = None
+    for column_number, month_period in enumerate(months, start=5):
+        cogs_ws.cell(3, column_number).value = month_period["label"]
+
+    _set_column_visibility(monthly_ws, 3, 12, len(months))
+    _set_column_visibility(cogs_ws, 5, 12, len(months))
+    _set_column_visibility(quarterly_ws, 3, 4, len(quarter_headers))
 
 
 def _populate_monthly_sheet(monthly_ws, months: list[str], monthly_items: dict[str, dict[str, float]], cogs_rows: dict[str, dict[str, float]]) -> None:
@@ -847,28 +930,30 @@ def _populate_cogs_sheet(cogs_ws, months: list[str], cogs_rows: dict[str, dict[s
         "external_vendors": 14,
     }
 
+    last_month_letter = get_column_letter(month_columns[months[-1]])
     for row_key, row_number in row_map.items():
         for month_key, column_number in month_columns.items():
             cogs_ws.cell(row=row_number, column=column_number).value = _round_currency(cogs_rows[row_key][month_key])
         first_letter = get_column_letter(month_columns[months[0]])
-        last_letter = get_column_letter(month_columns[months[-1]])
-        cogs_ws[f"Q{row_number}"] = f"=SUM({first_letter}{row_number}:{last_letter}{row_number})"
+        cogs_ws[f"Q{row_number}"] = f"=SUM({first_letter}{row_number}:{last_month_letter}{row_number})"
 
     cogs_ws["D15"] = None
     for month_key, column_number in month_columns.items():
         current_letter = get_column_letter(column_number)
         cogs_ws[f"{current_letter}15"] = f"=SUM({current_letter}4:{current_letter}14)"
-    cogs_ws["Q15"] = "=SUM(E15:P15)"
+    cogs_ws["Q15"] = f"=SUM(E15:{last_month_letter}15)"
 
 
 def _populate_quarterly_sheet(
     quarterly_ws,
     months: list[str],
     company_rules: dict[str, Any],
+    report_period: dict[str, Any],
 ) -> None:
     month_columns = _month_column_map(3, months)
     cogs_columns = _month_column_map(5, months)
-    quarter_groups = list(_quarter_months(months).items())
+    summary_periods = report_period["summary_periods"]
+    summary_letters = [get_column_letter(column_number) for column_number in range(3, 3 + len(summary_periods))]
 
     monthly_row_map = {
         6: 5,
@@ -897,8 +982,9 @@ def _populate_quarterly_sheet(
     percent_rows = [6, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 20, 25, 26, 27, 28, 29, 32, 33, 34, 35, 38, 39, 40, 41, 42, 43, 45, 47]
     tech_cost_per_month = _to_float(company_rules.get("monthly_technology_cost_inr"), default=25_800)
 
-    for quarter_index, (_, quarter_month_keys) in enumerate(quarter_groups, start=3):
+    for quarter_index, period_bucket in enumerate(summary_periods, start=3):
         quarter_letter = get_column_letter(quarter_index)
+        quarter_month_keys = period_bucket["month_keys"]
         for quarterly_row, monthly_row in monthly_row_map.items():
             quarterly_ws[f"{quarter_letter}{quarterly_row}"] = _quarter_formula_from_monthly(month_columns, quarter_month_keys, monthly_row)
 
@@ -918,17 +1004,17 @@ def _populate_quarterly_sheet(
         quarterly_ws[f"{quarter_letter}48"] = f"=IFERROR({quarter_letter}47/{quarter_letter}9,0)"
 
     for row_number in [6, 7, 8, 12, 13, 14, 15, 16, 17, 25, 26, 27, 28, 32, 33, 34, 38, 39, 40, 41, 42]:
-        quarterly_ws[f"G{row_number}"] = f"=SUM(C{row_number}:F{row_number})"
+        quarterly_ws[f"G{row_number}"] = _sum_formula(summary_letters, row_number)
 
     quarterly_ws["G9"] = "=SUM(G6:G8)"
     quarterly_ws["G18"] = "=SUM(G12:G17)"
     quarterly_ws["G20"] = "=G9-G18"
-    quarterly_ws["G21"] = "=IFERROR(AVERAGE(C21:F21),0)"
+    quarterly_ws["G21"] = "=IFERROR(G20/G9,0)"
     quarterly_ws["G29"] = "=SUM(G25:G28)"
     quarterly_ws["G35"] = "=SUM(G32:G34)"
     quarterly_ws["G43"] = "=SUM(G38:G42)"
     quarterly_ws["G45"] = "=SUM(G29,G35,G43)"
-    quarterly_ws["G47"] = "=SUM(C47:F47)"
+    quarterly_ws["G47"] = "=G20-G45"
     quarterly_ws["G48"] = "=IFERROR(G47/G9,0)"
 
     for row_number in percent_rows:
@@ -945,36 +1031,49 @@ def _populate_key_metrics_and_notes(
     note_totals: dict[str, dict[str, float]],
     cogs_rows: dict[str, dict[str, float]],
     company_rules: dict[str, Any],
+    report_period: dict[str, Any],
+    invoices_df: pd.DataFrame,
+    bills_df: pd.DataFrame,
+    journals_df: pd.DataFrame,
 ) -> None:
+    total_label = "Gross Margin (FY)" if report_period["period_type"] == "full_year" else "Gross Margin (Period)"
+    quarterly_ws["B52"] = total_label
     quarterly_ws["B53"] = "Peak Quarter Gross Margin"
+    quarterly_ws["B54"] = "Monthly OpEx Run-Rate"
     quarterly_ws["B55"] = "Monthly Gross Burn (run-rate)"
     quarterly_ws["B56"] = "Monthly Net (run-rate)"
     quarterly_ws["B57"] = "Revenue per Delivery FTE"
     quarterly_ws["B58"] = "Total People Cost (FY)"
 
-    preferred_months = company_rules.get("run_rate_preferred_months") or months[6:9]
-    valid_run_rate_months = [month_key for month_key in preferred_months if month_key in months] or months[6:9]
+    valid_run_rate_months = months[-1:] if len(months) == 1 else months[-min(3, len(months)) :]
     monthly_columns = _month_column_map(3, months)
     run_rate_start = get_column_letter(monthly_columns[valid_run_rate_months[0]])
     run_rate_end = get_column_letter(monthly_columns[valid_run_rate_months[-1]])
+    last_summary_letter = get_column_letter(2 + len(report_period["summary_periods"]))
+    average_bonus_adjustment = _round_currency(
+        sum(note_totals.get("bonus", {}).get(month_key, 0) for month_key in valid_run_rate_months)
+        / max(len(valid_run_rate_months), 1)
+    )
 
     quarterly_ws["C52"] = '=TEXT(G21,"0.0%")'
-    quarterly_ws["D52"] = "FY gross margin based on automated revenue and COGS roll-ups."
-    quarterly_ws["C53"] = '=TEXT(MAX(C21:F21),"0.0%")'
-    quarterly_ws["D53"] = "Highest quarterly gross margin from the generated quarterly view."
-    quarterly_ws["C54"] = f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30),"₹#,##0")'
+    quarterly_ws["D52"] = "Gross margin based on automated revenue and COGS roll-ups for the selected report."
+    quarterly_ws["C53"] = f'=TEXT(MAX(C21:{last_summary_letter}21),"0.0%")'
+    quarterly_ws["D53"] = "Highest visible summary-period gross margin from the generated quarterly view."
+    quarterly_ws["C54"] = (
+        f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30)-{average_bonus_adjustment},"₹#,##0")'
+    )
     quarterly_ws["D54"] = f"Run-rate uses {', '.join(pd.Timestamp(f'{month_key}-01').strftime('%b %Y') for month_key in valid_run_rate_months)}."
     quarterly_ws["C55"] = (
         f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}10:{run_rate_end}10)'
-        f'+AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30),"₹#,##0")'
+        f'+AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30)-{average_bonus_adjustment},"₹#,##0")'
     )
-    quarterly_ws["D55"] = "Gross burn is average monthly COGS plus average monthly operating expense."
-    quarterly_ws["C56"] = f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}31:{run_rate_end}31),"₹#,##0")'
-    quarterly_ws["D56"] = "Monthly net run-rate excludes one-time items only through the chosen run-rate months."
+    quarterly_ws["D55"] = "Gross burn is average monthly COGS plus run-rate operating expense, excluding bonus items."
+    quarterly_ws["C56"] = f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}31:{run_rate_end}31)+{average_bonus_adjustment},"₹#,##0")'
+    quarterly_ws["D56"] = "Monthly net run-rate adds back configured bonus items from the chosen run-rate months."
     quarterly_ws["C57"] = '=TEXT(IFERROR(G9/MAX(COUNTA(\'COGS Allocation Working\'!B4:B9),1),0),"₹#,##0")'
     quarterly_ws["D57"] = "Simple revenue-per-delivery-head view using the named delivery team rows in the allocation sheet."
     quarterly_ws["C58"] = '=TEXT(SUM(G12:G15,G25,G32),"₹#,##0")'
-    quarterly_ws["D58"] = "People cost view includes delivery people cost, Ramki S&M, and R&D salaries."
+    quarterly_ws["D58"] = "People cost view includes delivery people cost, Ramki S&M, and R&D salaries inside the selected period."
     quarterly_ws["C59"] = "-"
     quarterly_ws["D59"] = "Closing cash is left blank until balance-sheet or bank balance data is added to the MIS pipeline."
     quarterly_ws["C60"] = "-"
@@ -984,14 +1083,17 @@ def _populate_key_metrics_and_notes(
     one_time_total = sum(note_totals.get("one_time", {}).values())
     bsm_provision_total = sum(note_totals.get("bsm_provision", {}).values())
     techm_receivable_total = sum(note_totals.get("techm_receivable", {}).values())
-    invoice_count = int(_first_value(dashboard_summary_df, "invoice_count"))
-    bill_count = int(_first_value(dashboard_summary_df, "bill_count"))
-    journal_count = int(_first_value(dashboard_summary_df, "journal_count"))
-    ramki_total = sum(cogs_rows["ramki"].values()) + sum(monthly_ws.cell(13, column_number).value or 0 for column_number in range(3, 15))
+    invoice_count = len(invoices_df.index)
+    bill_count = len(bills_df.index)
+    journal_count = len(journals_df.index)
+    ramki_total = sum(cogs_rows["ramki"].values()) + sum(
+        monthly_ws.cell(13, column_number).value or 0
+        for column_number in range(3, 3 + len(months))
+    )
 
     quarterly_ws["B62"] = (
         f"⚑ Bonus review: {_format_inr_short(bonus_total)} identified against the MIS note-tracking rules. "
-        "One-time bonus items remain visible in P&L and are excluded only from run-rate interpretation."
+        "One-time bonus items remain visible in the P&L and are excluded only from run-rate metrics."
     )
     quarterly_ws["B63"] = (
         f"⚑ One-time expense review: {_format_inr_short(one_time_total)} flagged from source descriptions and notes."
@@ -1004,18 +1106,22 @@ def _populate_key_metrics_and_notes(
     )
     quarterly_ws["B66"] = (
         f"     Ramki assumption applied at $12,500/month with 100% S&M Apr-Aug and 50% COGS / 50% S&M from Sep onward. "
-        f"Generated annual Ramki cost: {_format_inr_short(ramki_total)}."
+        f"Generated report-period Ramki cost: {_format_inr_short(ramki_total)}."
     )
     quarterly_ws["B67"] = (
-        f"     Workbook generated from Zoho/BigQuery detail rows. Source counts included in this run: "
+        f"     Workbook generated from Zoho/BigQuery detail rows for {report_period['period_name']}. Source counts included in this run: "
         f"{invoice_count} invoices, {bill_count} bills, {journal_count} journals."
     )
 
 
 def _build_metrics(
     financial_year: str,
+    report_period: dict[str, Any],
     monthly_sheet_preview: pd.DataFrame,
     dashboard_summary_df: pd.DataFrame,
+    invoices_df: pd.DataFrame,
+    bills_df: pd.DataFrame,
+    journals_df: pd.DataFrame,
 ) -> dict[str, str]:
     revenue_rows = monthly_sheet_preview[monthly_sheet_preview["Line Item"].isin(["Tech Mahindra", "BSM Revenue", "FD Interest"])]
     expense_rows = monthly_sheet_preview[monthly_sheet_preview["Line Item"].isin(["COGS Total", "Ramki S&M", "Advertising", "Travel", "Meals", "R&D Salaries", "Consultant Exp.", "Software Subs", "Rent", "IT & Internet", "Legal", "Audit & Non-Op", "Other G&A"])]
@@ -1027,25 +1133,55 @@ def _build_metrics(
 
     return {
         "Financial Year": financial_year,
+        "Report Period": report_period["period_name"],
+        "Organization": _first_value(dashboard_summary_df, "source_org_name", "All Organizations"),
+        "Reporting Currency": _first_value(dashboard_summary_df, "reporting_currency", "INR"),
         "Revenue": _format_currency(revenue_total),
         "Expenses": _format_currency(expense_total),
         "Profit": _format_currency(profit_total),
         "Journal Adjustments": _format_currency(0),
-        "Invoices": str(int(_first_value(dashboard_summary_df, "invoice_count"))),
-        "Bills": str(int(_first_value(dashboard_summary_df, "bill_count"))),
+        "Invoices": str(len(invoices_df.index)),
+        "Bills": str(len(bills_df.index)),
         "Contacts": str(int(_first_value(dashboard_summary_df, "contact_count"))),
+        "Journals": str(len(journals_df.index)),
     }
 
 
 def get_mis_metrics(
-    financial_year: str,
+    financial_year: int | str,
     monthly_pl_df: pd.DataFrame | None = None,
     dashboard_summary_df: pd.DataFrame | None = None,
     project_id: str | None = None,
+    org_filter: str | None = None,
+    period_type: str = "full_year",
+    selected_month: int | None = None,
+    selected_quarter: str | None = None,
+    selected_half: str | None = None,
+    custom_start_date: date | datetime | None = None,
+    custom_end_date: date | datetime | None = None,
 ) -> dict[str, str]:
     """Return Streamlit metric-card values from real Gold layer data."""
+    financial_year_start = parse_financial_year_start(financial_year)
+    report_period = get_selected_report_period(
+        financial_year_start,
+        period_type,
+        selected_month=selected_month,
+        selected_quarter=selected_quarter,
+        selected_half=selected_half,
+        custom_start_date=custom_start_date,
+        custom_end_date=custom_end_date,
+    )
     if monthly_pl_df is None or dashboard_summary_df is None:
-        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id)
+        monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id, org_filter=org_filter, report_period=report_period)
+
+    monthly_pl_df = monthly_pl_df if monthly_pl_df is not None else pd.DataFrame()
+    monthly_pl_df = _filter_dataframe_by_date_range(
+        monthly_pl_df,
+        "report_month",
+        report_period["start_date"],
+        report_period["end_date"],
+    )
+    dashboard_summary_df = dashboard_summary_df if dashboard_summary_df is not None else pd.DataFrame()
 
     revenue_amount = _safe_sum(monthly_pl_df, "revenue_amount")
     expense_amount = _safe_sum(monthly_pl_df, "expense_amount")
@@ -1053,7 +1189,8 @@ def get_mis_metrics(
     profit_amount = _safe_sum(monthly_pl_df, "profit_amount") or (revenue_amount - expense_amount + journal_adjustment_amount)
 
     return {
-        "Financial Year": financial_year,
+        "Financial Year": report_period["fy_label"],
+        "Report Period": report_period["period_name"],
         "Organization": _first_value(dashboard_summary_df, "source_org_name", "All Organizations"),
         "Reporting Currency": _first_value(dashboard_summary_df, "reporting_currency", "INR"),
         "Revenue": _format_currency(revenue_amount),
@@ -1073,13 +1210,16 @@ def _prepare_dashboard_kpis(metrics: dict[str, str]) -> pd.DataFrame:
 def _generate_template_workbook(
     template_path: Path,
     destination_path: Path,
-    financial_year: str,
+    report_period: dict[str, Any],
     months: list[str],
     mapped_totals: dict[str, dict[str, float]],
     cogs_rows: dict[str, dict[str, float]],
     dashboard_summary_df: pd.DataFrame,
     company_rules: dict[str, Any],
     note_totals: dict[str, dict[str, float]],
+    invoices_df: pd.DataFrame,
+    bills_df: pd.DataFrame,
+    journals_df: pd.DataFrame,
 ) -> None:
     workbook = load_workbook(template_path)
     quarterly_ws = workbook[QUARTERLY_TEMPLATE_SHEET]
@@ -1089,11 +1229,27 @@ def _generate_template_workbook(
     fx_rate = _to_float(company_rules.get("fx_rate_inr_per_usd"), default=FX_RATE_DEFAULT)
     monthly_items = _build_monthly_line_items(months, mapped_totals, cogs_rows, company_rules)
 
-    _set_template_titles(quarterly_ws, monthly_ws, cogs_ws, financial_year, months, fx_rate, company_rules)
+    _clear_range_values(quarterly_ws, 4, 48, 3, 8)
+    _clear_range_values(monthly_ws, 3, 31, 3, 14)
+    _clear_range_values(cogs_ws, 3, 15, 5, 17)
+
+    _set_template_titles(quarterly_ws, monthly_ws, cogs_ws, report_period, fx_rate, company_rules)
     _populate_cogs_sheet(cogs_ws, months, cogs_rows)
     _populate_monthly_sheet(monthly_ws, months, monthly_items, cogs_rows)
-    _populate_quarterly_sheet(quarterly_ws, months, company_rules)
-    _populate_key_metrics_and_notes(quarterly_ws, monthly_ws, months, dashboard_summary_df, note_totals, cogs_rows, company_rules)
+    _populate_quarterly_sheet(quarterly_ws, months, company_rules, report_period)
+    _populate_key_metrics_and_notes(
+        quarterly_ws,
+        monthly_ws,
+        months,
+        dashboard_summary_df,
+        note_totals,
+        cogs_rows,
+        company_rules,
+        report_period,
+        invoices_df,
+        bills_df,
+        journals_df,
+    )
 
     quarterly_ws.freeze_panes = "C5"
     monthly_ws.freeze_panes = "C4"
@@ -1106,10 +1262,16 @@ def _generate_template_workbook(
 
 
 def generate_mis_report(
-    financial_year: str,
+    financial_year: int | str,
     output_dir: str | Path,
     project_id: str | None = None,
     org_filter: str | None = None,
+    period_type: str = "full_year",
+    selected_month: int | None = None,
+    selected_quarter: str | None = None,
+    selected_half: str | None = None,
+    custom_start_date: date | datetime | None = None,
+    custom_end_date: date | datetime | None = None,
     monthly_pl_df: pd.DataFrame | None = None,
     dashboard_summary_df: pd.DataFrame | None = None,
     bills_df: pd.DataFrame | None = None,
@@ -1117,6 +1279,16 @@ def generate_mis_report(
     journals_df: pd.DataFrame | None = None,
 ) -> dict[str, Any]:
     """Generate the CEO-format MIS workbook from detailed Zoho/BigQuery data."""
+    financial_year_start = parse_financial_year_start(financial_year)
+    report_period = get_selected_report_period(
+        financial_year_start,
+        period_type,
+        selected_month=selected_month,
+        selected_quarter=selected_quarter,
+        selected_half=selected_half,
+        custom_start_date=custom_start_date,
+        custom_end_date=custom_end_date,
+    )
     template_path = _template_path()
     if not template_path.exists():
         raise FileNotFoundError(f"MIS template workbook not found at {template_path}")
@@ -1125,17 +1297,30 @@ def generate_mis_report(
     cogs_config = _read_yaml(_cogs_config_path())
     company_rules = dict(cogs_config.get("company_rules", {}))
     company_rules["fx_rate_inr_per_usd"] = _to_float(cogs_config.get("fx_rate_inr_per_usd"), default=FX_RATE_DEFAULT)
-    months = _financial_year_months(financial_year, cogs_config.get("months"))
+    months = report_period["month_keys"]
 
-    if monthly_pl_df is None or dashboard_summary_df is None:
+    monthly_pl_df = monthly_pl_df if monthly_pl_df is not None else pd.DataFrame()
+    dashboard_summary_df = dashboard_summary_df if dashboard_summary_df is not None else pd.DataFrame()
+    if monthly_pl_df.empty and dashboard_summary_df.empty:
         try:
-            monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id)
+            monthly_pl_df, dashboard_summary_df = fetch_gold_mis_data(project_id, org_filter=org_filter, report_period=report_period)
         except Exception:
-            monthly_pl_df = monthly_pl_df if monthly_pl_df is not None else pd.DataFrame()
-            dashboard_summary_df = dashboard_summary_df if dashboard_summary_df is not None else pd.DataFrame()
+            monthly_pl_df = pd.DataFrame()
+            dashboard_summary_df = pd.DataFrame()
+    monthly_pl_df = _filter_dataframe_by_date_range(
+        monthly_pl_df,
+        "report_month",
+        report_period["start_date"],
+        report_period["end_date"],
+    )
 
     if invoices_df is None or bills_df is None or journals_df is None:
-        fetched_invoices_df, fetched_bills_df, fetched_journals_df = fetch_detailed_mis_data(project_id)
+        fetched_invoices_df, fetched_bills_df, fetched_journals_df = fetch_detailed_mis_data(
+            project_id,
+            org_filter=org_filter,
+            start_date=report_period["start_date"],
+            end_date=report_period["end_date"],
+        )
         invoices_df = fetched_invoices_df if invoices_df is None else invoices_df
         bills_df = fetched_bills_df if bills_df is None else bills_df
         journals_df = fetched_journals_df if journals_df is None else journals_df
@@ -1143,6 +1328,9 @@ def generate_mis_report(
     invoices_df = invoices_df if invoices_df is not None else pd.DataFrame()
     bills_df = bills_df if bills_df is not None else pd.DataFrame()
     journals_df = journals_df if journals_df is not None else pd.DataFrame()
+    invoices_df = _filter_dataframe_by_date_range(invoices_df, "invoice_date", report_period["start_date"], report_period["end_date"])
+    bills_df = _filter_dataframe_by_date_range(bills_df, "bill_date", report_period["start_date"], report_period["end_date"])
+    journals_df = _filter_dataframe_by_date_range(journals_df, "journal_date", report_period["start_date"], report_period["end_date"])
 
     fx_rate_default = company_rules["fx_rate_inr_per_usd"]
     revenue_rules = mapping_config.get("revenue", {})
@@ -1157,29 +1345,41 @@ def generate_mis_report(
 
     destination_folder = Path(output_dir)
     destination_folder.mkdir(parents=True, exist_ok=True)
-    report_path = destination_folder / f"MIS_PL_{_financial_year_token(financial_year)}_generated.xlsx"
+    report_path = destination_folder / f"MIS_PL_{_financial_year_token(financial_year_start)}_{report_period['file_suffix']}.xlsx"
 
     _generate_template_workbook(
         template_path=template_path,
         destination_path=report_path,
-        financial_year=financial_year,
+        report_period=report_period,
         months=months,
         mapped_totals=mapped_totals,
         cogs_rows=cogs_rows,
         dashboard_summary_df=dashboard_summary_df,
         company_rules=company_rules,
         note_totals=note_totals,
+        invoices_df=invoices_df,
+        bills_df=bills_df,
+        journals_df=journals_df,
     )
 
-    metrics = _build_metrics(financial_year, monthly_preview_df, dashboard_summary_df)
+    metrics = _build_metrics(
+        report_period["fy_label"],
+        report_period,
+        monthly_preview_df,
+        dashboard_summary_df,
+        invoices_df,
+        bills_df,
+        journals_df,
+    )
     return {
         "status": "success",
-        "message": "MIS report generated in the CEO workbook format.",
+        "message": f"MIS report generated for {report_period['period_name']}.",
         "metrics": metrics,
         "report_path": report_path,
         "is_placeholder": False,
         "summary": monthly_preview_df,
         "monthly_preview": monthly_preview_df,
+        "report_period": report_period,
         "dashboard_kpis": _prepare_dashboard_kpis(metrics),
     }
 
@@ -1187,5 +1387,5 @@ def generate_mis_report(
 def main() -> None:
     """CLI entrypoint for local MIS workbook generation."""
     project_root = _repo_root()
-    result = generate_mis_report("FY25-26", project_root / "outputs")
+    result = generate_mis_report(2025, project_root / "outputs")
     print(f"Generated MIS report: {result['report_path']}")
