@@ -56,8 +56,8 @@ def _dashboard_summary_df() -> pd.DataFrame:
                 "contact_count": 5,
                 "invoice_count": 3,
                 "invoice_total_amount": 230000,
-                "bill_count": 3,
-                "bill_total_amount": 75000,
+                "bill_count": 6,
+                "bill_total_amount": 137000,
                 "journal_count": 1,
                 "journal_total_amount": 5000,
                 "source_org_name": "All Organizations",
@@ -161,6 +161,44 @@ def _bills_df() -> pd.DataFrame:
             },
             {
                 "bill_number": "BILL-002",
+                "vendor_name": "Parashar",
+                "bill_date": "2025-07-05",
+                "currency_code": "INR",
+                "exchange_rate": 1,
+                "total_amount": 30000,
+                "notes": "Delivery salary",
+                "raw_json": json.dumps(
+                    {
+                        "bill_number": "BILL-002",
+                        "vendor_name": "Parashar",
+                        "date": "2025-07-05",
+                        "currency_code": "INR",
+                        "total": 30000,
+                        "line_items": [{"name": "Delivery payroll", "description": "Delivery salary", "item_total": 30000}],
+                    }
+                ),
+            },
+            {
+                "bill_number": "BILL-003",
+                "vendor_name": "Kashish",
+                "bill_date": "2025-07-11",
+                "currency_code": "INR",
+                "exchange_rate": 1,
+                "total_amount": 15000,
+                "notes": "BSM contractor",
+                "raw_json": json.dumps(
+                    {
+                        "bill_number": "BILL-003",
+                        "vendor_name": "Kashish",
+                        "date": "2025-07-11",
+                        "currency_code": "INR",
+                        "total": 15000,
+                        "line_items": [{"name": "BSM contractor", "description": "Delivery support", "item_total": 15000}],
+                    }
+                ),
+            },
+            {
+                "bill_number": "BILL-004",
                 "vendor_name": "Ad Vendor",
                 "bill_date": "2025-09-05",
                 "currency_code": "INR",
@@ -179,7 +217,26 @@ def _bills_df() -> pd.DataFrame:
                 ),
             },
             {
-                "bill_number": "BILL-003",
+                "bill_number": "BILL-005",
+                "vendor_name": "Dorothea Stoll",
+                "bill_date": "2025-10-05",
+                "currency_code": "INR",
+                "exchange_rate": 1,
+                "total_amount": 20000,
+                "notes": "Account & delivery manager",
+                "raw_json": json.dumps(
+                    {
+                        "bill_number": "BILL-005",
+                        "vendor_name": "Dorothea Stoll",
+                        "date": "2025-10-05",
+                        "currency_code": "INR",
+                        "total": 20000,
+                        "line_items": [{"name": "Dorothea", "description": "Account & delivery manager", "item_total": 20000}],
+                    }
+                ),
+            },
+            {
+                "bill_number": "BILL-006",
                 "vendor_name": "Innov8",
                 "bill_date": "2026-01-05",
                 "currency_code": "INR",
@@ -259,14 +316,51 @@ def test_generate_mis_report_creates_full_year_excel_file(workspace_tmp_path):
 
     assert quarterly_ws["B1"].value == "MIDOFFICE DATA  |  Profit & Loss Statement  |  FY 2025-26 (Apr 2025 – Mar 2026)"
     assert monthly_ws["B1"].value.startswith("Monthly P&L Detail  |  FY 2025-26 (Apr 2025 – Mar 2026)")
+    assert monthly_ws.max_row == 34
     assert monthly_ws["C3"].value == "Apr 25"
     assert monthly_ws["N3"].value == "Mar 26"
+    assert monthly_ws["B5"].value == "Client Revenue - Professional Services"
+    assert monthly_ws["B6"].value == "Client Revenue - Product"
+    assert monthly_ws["B7"].value == "Other Income"
+    assert monthly_ws["B10"].value == "Offshore COGS"
+    assert monthly_ws["B11"].value == "Onshore COGS"
+    assert monthly_ws["B16"].value == "Onshore Consultant Experience"
+    assert monthly_ws["B23"].value == "Consultant & Contractor Expense"
+    assert monthly_ws["B27"].value == "Office Rent"
     assert monthly_ws["C5"].value == 100000
     assert monthly_ws["C7"].value == 5000
+    assert monthly_ws["C10"].value == 40000
+    assert monthly_ws["F10"].value == 45000
+    assert monthly_ws["I11"].value == 582500
+    assert monthly_ws["C12"].value == 25800
+    assert monthly_ws["C13"].value == "=SUM(C10:C12)"
+    assert monthly_ws["C14"].value == "=C8-C13"
+    assert monthly_ws["C33"].value == "=SUM(C20,C25,C32)"
+    assert monthly_ws["C34"].value == "=C14-C33"
     assert quarterly_ws["C4"].value == "Q1\n(Apr-Jun 25)"
     assert quarterly_ws["F4"].value == "Q4\n(Jan-Mar 26)"
     assert quarterly_ws["G4"].value == "FY\n2025-26"
+    assert quarterly_ws["B6"].value == "  Client Revenue - Professional Services"
+    assert quarterly_ws["B7"].value == "  Client Revenue - Product"
+    assert quarterly_ws["B8"].value == "  Other Income"
+    assert quarterly_ws["B12"].value == "  Offshore COGS"
+    assert quarterly_ws["B13"].value == "  Onshore COGS"
+    assert quarterly_ws["B25"].value == "      Onshore Consultant Experience"
+    assert quarterly_ws["B33"].value == "      Consultant & Contractor Expense"
+    assert quarterly_ws["B38"].value == "      Office Rent"
+    assert quarterly_ws["B14"].value in (None, "")
+    assert quarterly_ws["B15"].value in (None, "")
+    assert quarterly_ws["B16"].value in (None, "")
+    assert quarterly_ws.row_dimensions[14].hidden is True
+    assert quarterly_ws.row_dimensions[15].hidden is True
+    assert quarterly_ws.row_dimensions[16].hidden is True
+    assert quarterly_ws["D12"].value == "=SUM('COGS Allocation Working'!H4:J9,'COGS Allocation Working'!H12:J14)"
+    assert quarterly_ws["E13"].value == "=SUM('COGS Allocation Working'!K10:M11)"
     assert cogs_ws["Q15"].value == "=SUM(E15:P15)"
+    visible_labels = [monthly_ws.cell(row, 2).value for row in range(1, monthly_ws.max_row + 1)]
+    assert "Rent (Innov8 co-working)" not in visible_labels
+    assert "Consultant & Contractor Expense (StackPro + R&D vendors)" not in visible_labels
+    assert "Ramki — S&M Allocation (100% Apr-Aug | 50% Sep-Mar)" not in visible_labels
 
 
 def test_generate_mis_report_creates_quarter_report(workspace_tmp_path):

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import copy
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -33,6 +34,76 @@ QUARTERLY_TEMPLATE_SHEET = "Quarterly P&L"
 COGS_TEMPLATE_SHEET = "COGS Allocation Working"
 TEMPLATE_FILE_NAME = "MidofficeData_KeyMetrics_PL_FY2526.xlsx"
 TEMPLATE_FILE_PATTERN = "MidofficeData_KeyMetrics_PL_*.xlsx"
+
+MONTHLY_ROW_LABELS = {
+    4: "REVENUE",
+    5: "Client Revenue - Professional Services",
+    6: "Client Revenue - Product",
+    7: "Other Income",
+    8: "TOTAL REVENUE",
+    9: "COGS",
+    10: "Offshore COGS",
+    11: "Onshore COGS",
+    12: "Technology Costs",
+    13: "TOTAL COGS",
+    14: "GROSS PROFIT",
+    15: "S&M",
+    16: "Onshore Consultant Experience",
+    17: "Advertising & Marketing",
+    18: "Travel Expenses",
+    19: "Meals & Entertainment",
+    20: "S&M Total",
+    21: "R&D",
+    22: "R&D Salaries",
+    23: "Consultant & Contractor Expense",
+    24: "Software Subs",
+    25: "R&D Total",
+    26: "G&A",
+    27: "Office Rent",
+    28: "IT & Internet",
+    29: "Legal",
+    30: "Audit & Non-Op",
+    31: "Other G&A",
+    32: "G&A Total",
+    33: "TOTAL OPEX",
+    34: "NET PROFIT/(LOSS)",
+}
+
+QUARTERLY_ROW_LABELS = {
+    6: "  Client Revenue - Professional Services",
+    7: "  Client Revenue - Product",
+    8: "  Other Income",
+    12: "  Offshore COGS",
+    13: "  Onshore COGS",
+    14: "",
+    15: "",
+    16: "",
+    25: "      Onshore Consultant Experience",
+    33: "      Consultant & Contractor Expense",
+    38: "      Office Rent",
+}
+
+MONTHLY_PREVIEW_ITEMS = [
+    ("Client Revenue - Professional Services", "techm_billings"),
+    ("Client Revenue - Product", "bsm_revenue"),
+    ("Other Income", "fd_interest"),
+    ("Offshore COGS", "offshore_cogs"),
+    ("Onshore COGS", "onshore_cogs"),
+    ("Technology Costs", "technology_costs"),
+    ("COGS Total", "cogs_total"),
+    ("Onshore Consultant Experience", "ramki_sm"),
+    ("Advertising & Marketing", "advertising_marketing"),
+    ("Travel Expenses", "travel_expenses"),
+    ("Meals & Entertainment", "meals_entertainment"),
+    ("R&D Salaries", "rd_salaries"),
+    ("Consultant & Contractor Expense", "consultant_expense"),
+    ("Software Subs", "software_subscriptions"),
+    ("Office Rent", "rent"),
+    ("IT & Internet", "it_internet"),
+    ("Legal", "legal"),
+    ("Audit & Non-Op", "audit_non_operating"),
+    ("Other G&A", "other_ga"),
+]
 
 
 load_dotenv()
@@ -718,6 +789,9 @@ def _build_monthly_line_items(
         "techm_billings": mapped_totals.get("techm_billings", _zero_month_map(months)),
         "bsm_revenue": mapped_totals.get("bsm_revenue", _zero_month_map(months)),
         "fd_interest": mapped_totals.get("fd_interest", _zero_month_map(months)),
+        "offshore_cogs": _zero_month_map(months),
+        "onshore_cogs": _zero_month_map(months),
+        "technology_costs": _zero_month_map(months),
         "ramki_sm": _zero_month_map(months),
         "advertising_marketing": mapped_totals.get("advertising_marketing", _zero_month_map(months)),
         "travel_expenses": mapped_totals.get("travel_expenses", _zero_month_map(months)),
@@ -738,6 +812,16 @@ def _build_monthly_line_items(
 
     for month_key in months:
         monthly_items["ramki_sm"][month_key] = _round_currency(ramki_monthly_inr if month_key < techm_start else ramki_monthly_inr * 0.5)
+        monthly_items["offshore_cogs"][month_key] = _round_currency(
+            sum(
+                cogs_rows[row_key].get(month_key, 0)
+                for row_key in ("parashar", "sangeeth", "jitin", "dipti", "dhanashri", "pinkesh", "bsm_crew", "conam_tech", "external_vendors")
+            )
+        )
+        monthly_items["onshore_cogs"][month_key] = _round_currency(
+            cogs_rows["ramki"].get(month_key, 0) + cogs_rows["dorothea"].get(month_key, 0)
+        )
+        monthly_items["technology_costs"][month_key] = _round_currency(cogs_rows["technology_costs"].get(month_key, 0))
         monthly_items["other_ga"][month_key] = _round_currency(
             mapped_totals.get("delivery_india", _zero_month_map(months)).get(month_key, 0)
             + mapped_totals.get("bsm_delivery_contractors", _zero_month_map(months)).get(month_key, 0)
@@ -748,11 +832,9 @@ def _build_monthly_line_items(
             )
         )
         monthly_items["cogs_total"][month_key] = _round_currency(
-            sum(
-                cogs_rows[row_key].get(month_key, 0)
-                for row_key in ("parashar", "sangeeth", "jitin", "dipti", "dhanashri", "pinkesh", "ramki", "dorothea", "bsm_crew", "conam_tech", "external_vendors")
-            )
-            + cogs_rows["technology_costs"].get(month_key, 0)
+            monthly_items["offshore_cogs"][month_key]
+            + monthly_items["onshore_cogs"][month_key]
+            + monthly_items["technology_costs"][month_key]
         )
 
     for month_key in months:
@@ -763,27 +845,8 @@ def _build_monthly_line_items(
 
 
 def _build_monthly_preview_dataframe(months: list[str], month_labels: dict[str, str], monthly_items: dict[str, dict[str, float]]) -> pd.DataFrame:
-    line_item_order = [
-        ("Tech Mahindra", "techm_billings"),
-        ("BSM Revenue", "bsm_revenue"),
-        ("FD Interest", "fd_interest"),
-        ("COGS Total", "cogs_total"),
-        ("Ramki S&M", "ramki_sm"),
-        ("Advertising", "advertising_marketing"),
-        ("Travel", "travel_expenses"),
-        ("Meals", "meals_entertainment"),
-        ("R&D Salaries", "rd_salaries"),
-        ("Consultant Exp.", "consultant_expense"),
-        ("Software Subs", "software_subscriptions"),
-        ("Rent", "rent"),
-        ("IT & Internet", "it_internet"),
-        ("Legal", "legal"),
-        ("Audit & Non-Op", "audit_non_operating"),
-        ("Other G&A", "other_ga"),
-    ]
-
     preview_rows = []
-    for label, item_key in line_item_order:
+    for label, item_key in MONTHLY_PREVIEW_ITEMS:
         row = {"Line Item": label}
         for month_key in months:
             row[month_labels[month_key]] = _round_currency(monthly_items[item_key][month_key])
@@ -805,6 +868,21 @@ def _quarter_formula_from_cogs(cogs_columns: dict[str, int], target_months: list
     return f"=SUM('{COGS_TEMPLATE_SHEET}'!{start_letter}{start_row}:{end_letter}{end_row})"
 
 
+def _quarter_formula_from_cogs_ranges(
+    cogs_columns: dict[str, int],
+    target_months: list[str],
+    row_ranges: list[tuple[int, int]],
+) -> str:
+    """Build a quarter formula that adds multiple COGS row ranges."""
+    start_letter = get_column_letter(cogs_columns[target_months[0]])
+    end_letter = get_column_letter(cogs_columns[target_months[-1]])
+    range_terms = [
+        f"'{COGS_TEMPLATE_SHEET}'!{start_letter}{start_row}:{end_letter}{end_row}"
+        for start_row, end_row in row_ranges
+    ]
+    return f"=SUM({','.join(range_terms)})"
+
+
 def _clear_range_values(worksheet, start_row: int, end_row: int, start_column: int, end_column: int) -> None:
     """Clear a rectangular cell range without touching styles."""
     for row_number in range(start_row, end_row + 1):
@@ -824,6 +902,46 @@ def _sum_formula(column_letters: list[str], row_number: int) -> str:
     if len(column_letters) == 1:
         return f"={column_letters[0]}{row_number}"
     return f"=SUM({column_letters[0]}{row_number}:{column_letters[-1]}{row_number})"
+
+
+def _copy_row_format(worksheet, source_row: int, target_row: int, start_column: int = 2, end_column: int = 14) -> None:
+    """Copy formatting from one workbook row to another."""
+    for column_number in range(start_column, end_column + 1):
+        source_cell = worksheet.cell(source_row, column_number)
+        target_cell = worksheet.cell(target_row, column_number)
+        target_cell._style = copy(source_cell._style)
+        target_cell.font = copy(source_cell.font)
+        target_cell.fill = copy(source_cell.fill)
+        target_cell.border = copy(source_cell.border)
+        target_cell.alignment = copy(source_cell.alignment)
+        target_cell.number_format = source_cell.number_format
+        target_cell.protection = copy(source_cell.protection)
+    worksheet.row_dimensions[target_row].height = worksheet.row_dimensions[source_row].height
+
+
+def _ensure_monthly_sheet_layout(monthly_ws) -> None:
+    """Insert extra COGS detail rows once so the monthly sheet can show grouped COGS output."""
+    if monthly_ws.max_row >= 34 and monthly_ws["B10"].value == "Offshore COGS":
+        return
+
+    monthly_ws.insert_rows(11, amount=3)
+    for row_number in (11, 12, 13):
+        _copy_row_format(monthly_ws, 10, row_number)
+
+
+def _apply_report_labels(monthly_ws, quarterly_ws) -> None:
+    """Write the requested output labels into the workbook."""
+    for row_number, label in MONTHLY_ROW_LABELS.items():
+        monthly_ws.cell(row=row_number, column=2).value = label
+
+    for row_number, label in QUARTERLY_ROW_LABELS.items():
+        quarterly_ws.cell(row=row_number, column=2).value = label
+
+    for row_number in (12, 13, 14):
+        monthly_ws.row_dimensions[row_number].hidden = False
+
+    for row_number in (14, 15, 16):
+        quarterly_ws.row_dimensions[row_number].hidden = True
 
 
 def _set_template_titles(
@@ -881,37 +999,37 @@ def _populate_monthly_sheet(monthly_ws, months: list[str], monthly_items: dict[s
         "techm_billings": 5,
         "bsm_revenue": 6,
         "fd_interest": 7,
-        "ramki_sm": 13,
-        "advertising_marketing": 14,
-        "travel_expenses": 15,
-        "meals_entertainment": 16,
-        "rd_salaries": 19,
-        "consultant_expense": 20,
-        "software_subscriptions": 21,
-        "rent": 24,
-        "it_internet": 25,
-        "legal": 26,
-        "audit_non_operating": 27,
-        "other_ga": 28,
+        "offshore_cogs": 10,
+        "onshore_cogs": 11,
+        "technology_costs": 12,
+        "ramki_sm": 16,
+        "advertising_marketing": 17,
+        "travel_expenses": 18,
+        "meals_entertainment": 19,
+        "rd_salaries": 22,
+        "consultant_expense": 23,
+        "software_subscriptions": 24,
+        "rent": 27,
+        "it_internet": 28,
+        "legal": 29,
+        "audit_non_operating": 30,
+        "other_ga": 31,
     }
 
     for item_key, row_number in row_map.items():
         for month_key, column_number in month_columns.items():
             monthly_ws.cell(row=row_number, column=column_number).value = _round_currency(monthly_items[item_key][month_key])
 
-    tech_cost_per_month = cogs_rows["technology_costs"]
-    cogs_month_columns = _month_column_map(5, months)
     for month_key, column_number in month_columns.items():
-        cogs_total_column = get_column_letter(cogs_month_columns[month_key])
         current_letter = get_column_letter(column_number)
         monthly_ws[f"{current_letter}8"] = f"=SUM({current_letter}5:{current_letter}7)"
-        monthly_ws[f"{current_letter}10"] = f"='{COGS_TEMPLATE_SHEET}'!{cogs_total_column}15+{tech_cost_per_month[month_key]}"
-        monthly_ws[f"{current_letter}11"] = f"={current_letter}8-{current_letter}10"
-        monthly_ws[f"{current_letter}17"] = f"=SUM({current_letter}13:{current_letter}16)"
-        monthly_ws[f"{current_letter}22"] = f"=SUM({current_letter}19:{current_letter}21)"
-        monthly_ws[f"{current_letter}29"] = f"=SUM({current_letter}24:{current_letter}28)"
-        monthly_ws[f"{current_letter}30"] = f"=SUM({current_letter}17,{current_letter}22,{current_letter}29)"
-        monthly_ws[f"{current_letter}31"] = f"={current_letter}11-{current_letter}30"
+        monthly_ws[f"{current_letter}13"] = f"=SUM({current_letter}10:{current_letter}12)"
+        monthly_ws[f"{current_letter}14"] = f"={current_letter}8-{current_letter}13"
+        monthly_ws[f"{current_letter}20"] = f"=SUM({current_letter}16:{current_letter}19)"
+        monthly_ws[f"{current_letter}25"] = f"=SUM({current_letter}22:{current_letter}24)"
+        monthly_ws[f"{current_letter}32"] = f"=SUM({current_letter}27:{current_letter}31)"
+        monthly_ws[f"{current_letter}33"] = f"=SUM({current_letter}20,{current_letter}25,{current_letter}32)"
+        monthly_ws[f"{current_letter}34"] = f"={current_letter}14-{current_letter}33"
 
 
 def _populate_cogs_sheet(cogs_ws, months: list[str], cogs_rows: dict[str, dict[str, float]]) -> None:
@@ -959,27 +1077,20 @@ def _populate_quarterly_sheet(
         6: 5,
         7: 6,
         8: 7,
-        25: 13,
-        26: 14,
-        27: 15,
-        28: 16,
-        32: 19,
-        33: 20,
-        34: 21,
-        38: 24,
-        39: 25,
-        40: 26,
-        41: 27,
-        42: 28,
+        25: 16,
+        26: 17,
+        27: 18,
+        28: 19,
+        32: 22,
+        33: 23,
+        34: 24,
+        38: 27,
+        39: 28,
+        40: 29,
+        41: 30,
+        42: 31,
     }
-    cogs_formula_rows = {
-        12: (4, 9),
-        13: (12, 12),
-        14: (10, 10),
-        15: (11, 11),
-        16: (13, 14),
-    }
-    percent_rows = [6, 7, 8, 9, 12, 13, 14, 15, 16, 17, 18, 20, 25, 26, 27, 28, 29, 32, 33, 34, 35, 38, 39, 40, 41, 42, 43, 45, 47]
+    percent_rows = [6, 7, 8, 9, 12, 13, 17, 18, 20, 25, 26, 27, 28, 29, 32, 33, 34, 35, 38, 39, 40, 41, 42, 43, 45, 47]
     tech_cost_per_month = _to_float(company_rules.get("monthly_technology_cost_inr"), default=25_800)
 
     for quarter_index, period_bucket in enumerate(summary_periods, start=3):
@@ -988,8 +1099,19 @@ def _populate_quarterly_sheet(
         for quarterly_row, monthly_row in monthly_row_map.items():
             quarterly_ws[f"{quarter_letter}{quarterly_row}"] = _quarter_formula_from_monthly(month_columns, quarter_month_keys, monthly_row)
 
-        for quarterly_row, (cogs_row_start, cogs_row_end) in cogs_formula_rows.items():
-            quarterly_ws[f"{quarter_letter}{quarterly_row}"] = _quarter_formula_from_cogs(cogs_columns, quarter_month_keys, cogs_row_start, cogs_row_end)
+        quarterly_ws[f"{quarter_letter}12"] = _quarter_formula_from_cogs_ranges(
+            cogs_columns,
+            quarter_month_keys,
+            [(4, 9), (12, 14)],
+        )
+        quarterly_ws[f"{quarter_letter}13"] = _quarter_formula_from_cogs_ranges(
+            cogs_columns,
+            quarter_month_keys,
+            [(10, 11)],
+        )
+        quarterly_ws[f"{quarter_letter}14"] = None
+        quarterly_ws[f"{quarter_letter}15"] = None
+        quarterly_ws[f"{quarter_letter}16"] = None
 
         quarterly_ws[f"{quarter_letter}17"] = f"={tech_cost_per_month}*{len(quarter_month_keys)}"
         quarterly_ws[f"{quarter_letter}9"] = f"=SUM({quarter_letter}6:{quarter_letter}8)"
@@ -1003,9 +1125,12 @@ def _populate_quarterly_sheet(
         quarterly_ws[f"{quarter_letter}47"] = f"={quarter_letter}20-{quarter_letter}45"
         quarterly_ws[f"{quarter_letter}48"] = f"=IFERROR({quarter_letter}47/{quarter_letter}9,0)"
 
-    for row_number in [6, 7, 8, 12, 13, 14, 15, 16, 17, 25, 26, 27, 28, 32, 33, 34, 38, 39, 40, 41, 42]:
+    for row_number in [6, 7, 8, 12, 13, 17, 25, 26, 27, 28, 32, 33, 34, 38, 39, 40, 41, 42]:
         quarterly_ws[f"G{row_number}"] = _sum_formula(summary_letters, row_number)
 
+    quarterly_ws["G14"] = None
+    quarterly_ws["G15"] = None
+    quarterly_ws["G16"] = None
     quarterly_ws["G9"] = "=SUM(G6:G8)"
     quarterly_ws["G18"] = "=SUM(G12:G17)"
     quarterly_ws["G20"] = "=G9-G18"
@@ -1019,6 +1144,9 @@ def _populate_quarterly_sheet(
 
     for row_number in percent_rows:
         quarterly_ws[f"H{row_number}"] = f"=IFERROR(G{row_number}/$G$9,0)"
+    quarterly_ws["H14"] = None
+    quarterly_ws["H15"] = None
+    quarterly_ws["H16"] = None
     quarterly_ws["H21"] = None
     quarterly_ws["H48"] = None
 
@@ -1060,20 +1188,20 @@ def _populate_key_metrics_and_notes(
     quarterly_ws["C53"] = f'=TEXT(MAX(C21:{last_summary_letter}21),"0.0%")'
     quarterly_ws["D53"] = "Highest visible summary-period gross margin from the generated quarterly view."
     quarterly_ws["C54"] = (
-        f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30)-{average_bonus_adjustment},"₹#,##0")'
+        f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}33:{run_rate_end}33)-{average_bonus_adjustment},"₹#,##0")'
     )
     quarterly_ws["D54"] = f"Run-rate uses {', '.join(pd.Timestamp(f'{month_key}-01').strftime('%b %Y') for month_key in valid_run_rate_months)}."
     quarterly_ws["C55"] = (
-        f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}10:{run_rate_end}10)'
-        f'+AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}30:{run_rate_end}30)-{average_bonus_adjustment},"₹#,##0")'
+        f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}13:{run_rate_end}13)'
+        f'+AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}33:{run_rate_end}33)-{average_bonus_adjustment},"₹#,##0")'
     )
     quarterly_ws["D55"] = "Gross burn is average monthly COGS plus run-rate operating expense, excluding bonus items."
-    quarterly_ws["C56"] = f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}31:{run_rate_end}31)+{average_bonus_adjustment},"₹#,##0")'
+    quarterly_ws["C56"] = f'=TEXT(AVERAGE(\'{MONTHLY_TEMPLATE_SHEET}\'!{run_rate_start}34:{run_rate_end}34)+{average_bonus_adjustment},"₹#,##0")'
     quarterly_ws["D56"] = "Monthly net run-rate adds back configured bonus items from the chosen run-rate months."
     quarterly_ws["C57"] = '=TEXT(IFERROR(G9/MAX(COUNTA(\'COGS Allocation Working\'!B4:B9),1),0),"₹#,##0")'
     quarterly_ws["D57"] = "Simple revenue-per-delivery-head view using the named delivery team rows in the allocation sheet."
-    quarterly_ws["C58"] = '=TEXT(SUM(G12:G15,G25,G32),"₹#,##0")'
-    quarterly_ws["D58"] = "People cost view includes delivery people cost, Ramki S&M, and R&D salaries inside the selected period."
+    quarterly_ws["C58"] = '=TEXT(SUM(\'COGS Allocation Working\'!Q4:Q12,G25,G32),"₹#,##0")'
+    quarterly_ws["D58"] = "People cost view includes delivery people cost, Onshore Consultant Experience, and R&D salaries inside the selected period."
     quarterly_ws["C59"] = "-"
     quarterly_ws["D59"] = "Closing cash is left blank until balance-sheet or bank balance data is added to the MIS pipeline."
     quarterly_ws["C60"] = "-"
@@ -1087,7 +1215,7 @@ def _populate_key_metrics_and_notes(
     bill_count = len(bills_df.index)
     journal_count = len(journals_df.index)
     ramki_total = sum(cogs_rows["ramki"].values()) + sum(
-        monthly_ws.cell(13, column_number).value or 0
+        monthly_ws.cell(16, column_number).value or 0
         for column_number in range(3, 3 + len(months))
     )
 
@@ -1105,7 +1233,7 @@ def _populate_key_metrics_and_notes(
         f"     TechM receivable watchlist: {_format_inr_short(techm_receivable_total)} tagged from invoice metadata for follow-up."
     )
     quarterly_ws["B66"] = (
-        f"     Ramki assumption applied at $12,500/month with 100% S&M Apr-Aug and 50% COGS / 50% S&M from Sep onward. "
+        f"     Onshore Consultant Experience uses the Ramki assumption of $12,500/month with 100% S&M Apr-Aug and 50% COGS / 50% S&M from Sep onward. "
         f"Generated report-period Ramki cost: {_format_inr_short(ramki_total)}."
     )
     quarterly_ws["B67"] = (
@@ -1123,8 +1251,30 @@ def _build_metrics(
     bills_df: pd.DataFrame,
     journals_df: pd.DataFrame,
 ) -> dict[str, str]:
-    revenue_rows = monthly_sheet_preview[monthly_sheet_preview["Line Item"].isin(["Tech Mahindra", "BSM Revenue", "FD Interest"])]
-    expense_rows = monthly_sheet_preview[monthly_sheet_preview["Line Item"].isin(["COGS Total", "Ramki S&M", "Advertising", "Travel", "Meals", "R&D Salaries", "Consultant Exp.", "Software Subs", "Rent", "IT & Internet", "Legal", "Audit & Non-Op", "Other G&A"])]
+    revenue_rows = monthly_sheet_preview[
+        monthly_sheet_preview["Line Item"].isin(
+            ["Client Revenue - Professional Services", "Client Revenue - Product", "Other Income"]
+        )
+    ]
+    expense_rows = monthly_sheet_preview[
+        monthly_sheet_preview["Line Item"].isin(
+            [
+                "COGS Total",
+                "Onshore Consultant Experience",
+                "Advertising & Marketing",
+                "Travel Expenses",
+                "Meals & Entertainment",
+                "R&D Salaries",
+                "Consultant & Contractor Expense",
+                "Software Subs",
+                "Office Rent",
+                "IT & Internet",
+                "Legal",
+                "Audit & Non-Op",
+                "Other G&A",
+            ]
+        )
+    ]
     numeric_columns = [column_name for column_name in monthly_sheet_preview.columns if column_name != "Line Item"]
 
     revenue_total = float(revenue_rows[numeric_columns].sum().sum()) if not revenue_rows.empty else 0.0
@@ -1225,15 +1375,17 @@ def _generate_template_workbook(
     quarterly_ws = workbook[QUARTERLY_TEMPLATE_SHEET]
     monthly_ws = workbook[MONTHLY_TEMPLATE_SHEET]
     cogs_ws = workbook[COGS_TEMPLATE_SHEET]
+    _ensure_monthly_sheet_layout(monthly_ws)
 
     fx_rate = _to_float(company_rules.get("fx_rate_inr_per_usd"), default=FX_RATE_DEFAULT)
     monthly_items = _build_monthly_line_items(months, mapped_totals, cogs_rows, company_rules)
 
     _clear_range_values(quarterly_ws, 4, 48, 3, 8)
-    _clear_range_values(monthly_ws, 3, 31, 3, 14)
+    _clear_range_values(monthly_ws, 3, 34, 3, 14)
     _clear_range_values(cogs_ws, 3, 15, 5, 17)
 
     _set_template_titles(quarterly_ws, monthly_ws, cogs_ws, report_period, fx_rate, company_rules)
+    _apply_report_labels(monthly_ws, quarterly_ws)
     _populate_cogs_sheet(cogs_ws, months, cogs_rows)
     _populate_monthly_sheet(monthly_ws, months, monthly_items, cogs_rows)
     _populate_quarterly_sheet(quarterly_ws, months, company_rules, report_period)
