@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import traceback
+from html import escape
 from io import BytesIO
 from pathlib import Path
 
@@ -12,6 +13,7 @@ import streamlit as st
 from backend.reconciliation.bank_reconciliation import run_bank_reconciliation
 from backend.reconciliation.gst_reconciliation import run_gst_reconciliation
 from backend.reconciliation.upload_registry import fetch_reconciliation_uploads
+from backend.services.upload_service import delete_bank_upload, delete_gstr_upload
 from src.ui import file_summary_card, load_css, page_header, section_card
 
 
@@ -20,6 +22,92 @@ load_css()
 page_header(
     "Reconciliation",
     "Match uploaded bank and GST data against accounting records from the warehouse.",
+)
+
+st.markdown(
+    """
+    <style>
+    div.block-container {
+        padding-top: 1.25rem;
+    }
+    div[data-testid="stVerticalBlock"] {
+        gap: 0.55rem;
+    }
+    div[data-testid="stTabs"] div[role="tablist"] {
+        flex-wrap: wrap;
+        gap: 0.35rem;
+        border-bottom: 0;
+        align-items: center;
+        margin: 0.15rem 0 0.65rem;
+    }
+    div[data-testid="stTabs"] button[role="tab"] {
+        min-height: 1.9rem;
+        padding: 0.2rem 0.7rem;
+        border: 1px solid #c8d7ea;
+        border-radius: 8px;
+        background: #f6f8fb;
+        color: #1f2937;
+        box-shadow: none;
+    }
+    div[data-testid="stTabs"] button[role="tab"] p {
+        font-size: 0.82rem;
+        line-height: 1.05;
+        color: inherit;
+        font-weight: 600;
+    }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] {
+        border-color: #1d4ed8;
+        background: #1d4ed8;
+        color: #ffffff;
+        font-weight: 700;
+    }
+    div[data-testid="stTabs"] button[role="tab"][aria-selected="true"] p {
+        color: #ffffff;
+    }
+    div[data-testid="stButton"] > button {
+        min-height: 2.35rem;
+        border-radius: 8px;
+        font-weight: 700;
+    }
+    div[data-testid="stButton"] > button:disabled,
+    div[data-testid="stButton"] > button[disabled] {
+        background: #e8eef7 !important;
+        border-color: #b9c7da !important;
+        color: #42526e !important;
+        opacity: 1 !important;
+    }
+    div[data-testid="stCheckbox"] {
+        padding-top: 0.35rem;
+    }
+    .recon-warning-card {
+        border: 1px solid #f4c27a;
+        border-left: 4px solid #d97706;
+        border-radius: 8px;
+        background: #fff8eb;
+        padding: 0.75rem 0.9rem;
+        margin: 0.1rem 0 0.35rem;
+    }
+    .recon-warning-card strong {
+        display: block;
+        color: #7c2d12;
+        font-size: 0.92rem;
+        margin-bottom: 0.15rem;
+    }
+    .recon-warning-card p {
+        color: #3f2a13;
+        font-size: 0.88rem;
+        line-height: 1.35;
+        margin: 0;
+    }
+    .recon-warning-card span {
+        display: block;
+        color: #7c3f00;
+        font-size: 0.76rem;
+        margin-top: 0.35rem;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
 bank_tab, gst_tab = st.tabs(["Bank Reconciliation", "GST Reconciliation"])
@@ -703,40 +791,190 @@ def _upload_label(upload_row: dict) -> str:
     return f"{file_name} | {uploaded_at} | {row_count} rows"
 
 
-def _render_upload_selector(source_type: str, title: str, empty_message: str, key: str) -> dict | None:
+def _is_auth_error(error: Exception) -> bool:
+    """Detect cloud auth failures without surfacing technical text to finance users."""
+    error_text = str(error).lower()
+    auth_markers = [
+        "reauthentication",
+        "application-default login",
+        "default credentials",
+        "invalid_grant",
+        "unauthorized",
+        "credentials",
+        "permission denied",
+    ]
+    return any(marker in error_text for marker in auth_markers)
+
+
+def _show_upload_warning(title: str, message: str, *, show_developer_note: bool = False) -> None:
+    """Render one compact warning card for unavailable reconciliation uploads."""
+    developer_note = (
+        "<span>Developer note: run <code>gcloud auth application-default login</code></span>"
+        if show_developer_note
+        else ""
+    )
+    st.markdown(
+        f"""
+        <div class="recon-warning-card">
+            <strong>{escape(title)}</strong>
+            <p>{escape(message)}</p>
+            {developer_note}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _friendly_delete_error(error: Exception) -> str:
+    """Return a safe UI error for upload deletion failures."""
+    if _is_auth_error(error):
+        return "Upload could not be deleted. Please refresh cloud authentication and try again."
+    return "Upload could not be deleted. Please check permissions and try again."
+
+
+def _clear_reconciliation_state(source_key: str) -> None:
+    """Clear cached UI state tied to a deleted upload."""
+    if source_key == "bank":
+        state_keys = [
+            "bank_recon_result",
+            "bank_recon_error",
+            "selected_bank_upload_id",
+            "confirm_delete_bank_upload",
+            "confirm_delete_bank_upload_upload_id",
+        ]
+    else:
+        state_keys = [
+            "gst_recon_result",
+            "gst_recon_error",
+            "selected_gstr_upload_id",
+            "confirm_delete_gstr_upload",
+            "confirm_delete_gstr_upload_upload_id",
+        ]
+
+    for state_key in state_keys:
+        st.session_state.pop(state_key, None)
+
+
+def _render_delete_upload_button(
+    selected_upload: dict | None,
+    *,
+    button_label: str,
+    confirm_key: str,
+) -> None:
+    """Render the small delete trigger next to the upload selector."""
+    if selected_upload is None:
+        st.button(button_label, type="secondary", use_container_width=True, disabled=True, key=f"{confirm_key}_disabled")
+        return
+
+    selected_upload_id = str(selected_upload.get("upload_id", ""))
+    pending_upload_id_key = f"{confirm_key}_upload_id"
+    if st.session_state.get(confirm_key) and st.session_state.get(pending_upload_id_key) != selected_upload_id:
+        st.session_state.pop(confirm_key, None)
+        st.session_state.pop(pending_upload_id_key, None)
+
+    if st.button(button_label, type="secondary", use_container_width=True, key=f"{confirm_key}_start"):
+        st.session_state[confirm_key] = True
+        st.session_state[pending_upload_id_key] = selected_upload_id
+
+
+def _render_delete_upload_confirmation(
+    *,
+    source_key: str,
+    confirm_key: str,
+    delete_callback,
+) -> None:
+    """Render full-width confirmation controls for the selected upload."""
+    if not st.session_state.get(confirm_key):
+        return
+
+    st.warning("This will remove the selected uploaded file from reconciliation input. It will not delete Zoho/Books data.")
+    pending_upload_id_key = f"{confirm_key}_upload_id"
+    confirm_columns = st.columns([1.7, 1.2, 4], vertical_alignment="center")
+    with confirm_columns[0]:
+        if st.button("Confirm delete", key=f"{confirm_key}_confirm"):
+            try:
+                delete_callback(st.session_state[pending_upload_id_key])
+                _clear_reconciliation_state(source_key)
+                st.session_state["upload_delete_success"] = "Upload deleted successfully."
+                st.success("Upload deleted successfully.")
+                st.rerun()
+            except Exception as error:
+                print(f"[Reconciliation UI] Upload delete failed for {source_key}: {error}")
+                st.error(_friendly_delete_error(error))
+    with confirm_columns[1]:
+        if st.button("Cancel", key=f"{confirm_key}_cancel"):
+            st.session_state.pop(confirm_key, None)
+            st.session_state.pop(pending_upload_id_key, None)
+            st.rerun()
+
+
+def _render_upload_selector(
+    source_type: str,
+    title: str,
+    empty_message: str,
+    key: str,
+    lookup_failed_message: str,
+    *,
+    delete_source_key: str,
+    delete_confirm_key: str,
+    delete_callback,
+) -> dict | None:
     """Render latest/default upload selector for bank or GSTR reconciliation."""
     try:
         uploads_df = fetch_reconciliation_uploads(source_type)
     except Exception as error:
-        st.warning(f"{empty_message} Upload lookup failed: {error}")
+        print(f"[Reconciliation UI] Upload lookup failed for {source_type}: {error}")
+        _show_upload_warning(
+            title,
+            lookup_failed_message,
+            show_developer_note=_is_auth_error(error),
+        )
         return None
 
     if uploads_df.empty:
-        st.warning(empty_message)
+        _show_upload_warning(title, empty_message)
         return None
 
     upload_records = uploads_df.to_dict(orient="records")
     latest_upload = upload_records[0]
     st.caption(f"{title}: {_upload_label(latest_upload)}")
 
-    selected_upload_id = st.selectbox(
-        "Select upload for reconciliation",
-        options=[upload["upload_id"] for upload in upload_records],
-        index=0,
-        format_func=lambda upload_id: _upload_label(
-            next(upload for upload in upload_records if upload["upload_id"] == upload_id)
-        ),
-        key=key,
-        help="Latest upload is selected by default. Older uploads remain available for audit.",
+    selector_column, delete_column = st.columns([5, 1], vertical_alignment="bottom")
+    with selector_column:
+        selected_upload_id = st.selectbox(
+            "Select upload for reconciliation",
+            options=[upload["upload_id"] for upload in upload_records],
+            index=0,
+            format_func=lambda upload_id: _upload_label(
+                next(upload for upload in upload_records if upload["upload_id"] == upload_id)
+            ),
+            key=key,
+            help="Latest upload is selected by default. Older uploads remain available for audit.",
+        )
+    selected_upload = next(upload for upload in upload_records if upload["upload_id"] == selected_upload_id)
+    with delete_column:
+        _render_delete_upload_button(
+            selected_upload,
+            button_label="Delete upload",
+            confirm_key=delete_confirm_key,
+        )
+    _render_delete_upload_confirmation(
+        source_key=delete_source_key,
+        confirm_key=delete_confirm_key,
+        delete_callback=delete_callback,
     )
 
-    selected_upload = next(upload for upload in upload_records if upload["upload_id"] == selected_upload_id)
     st.info(
         f"Selected file: {selected_upload.get('file_name', '')} | "
         f"Uploaded: {_friendly_timestamp(selected_upload.get('uploaded_at'))} | "
         f"Rows: {selected_upload.get('row_count', 0)}"
     )
     return selected_upload
+
+
+delete_success_message = st.session_state.pop("upload_delete_success", None)
+if delete_success_message:
+    st.success(delete_success_message)
 
 
 def _gst_stage_callback(progress_bar, status_placeholder):
@@ -769,6 +1007,10 @@ with bank_tab:
         "Latest Bank Upload",
         "Please upload a bank statement first.",
         "selected_bank_upload_id",
+        "Bank upload could not be loaded. Please refresh cloud authentication and try again.",
+        delete_source_key="bank",
+        delete_confirm_key="confirm_delete_bank_upload",
+        delete_callback=delete_bank_upload,
     )
     generate_bank_ai = st.checkbox(
         "Generate Vertex AI insights",
@@ -776,8 +1018,14 @@ with bank_tab:
         key="generate_bank_ai_insights",
         help="Rule-based matching runs fastest. Enable Vertex AI only when you need exception explanations.",
     )
+    run_bank_clicked = st.button(
+        "Run Bank Reconciliation",
+        type="primary",
+        use_container_width=True,
+        disabled=selected_bank_upload is None,
+    )
 
-    if st.button("Run Bank Reconciliation", type="primary", use_container_width=True, disabled=selected_bank_upload is None):
+    if run_bank_clicked:
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         update_bank_stage = _bank_stage_callback(progress_bar, status_placeholder)
@@ -852,17 +1100,12 @@ with bank_tab:
                 st.dataframe(_bank_review_dataframe(selected_bank_rows), use_container_width=True, hide_index=True)
         with bank_technical_tab:
             st.dataframe(_bank_technical_dataframe(bank_result["results"]), use_container_width=True, hide_index=True)
-    elif bank_error:
+    elif bank_error and selected_bank_upload is not None:
         section_card(
             "Bank Reconciliation Not Completed",
             body_html="<p>The bank reconciliation could not run. Upload bank data and ensure BigQuery credentials are available.</p>",
         )
         st.error(bank_error)
-    else:
-        section_card(
-            "Ready to Run",
-            body_html="<p>Click the button above after uploading bank statements.</p>",
-        )
 
 with gst_tab:
     section_card(
@@ -874,6 +1117,10 @@ with gst_tab:
         "Latest GSTR Upload",
         "Please upload a GSTR file first.",
         "selected_gstr_upload_id",
+        "GSTR upload could not be loaded. Please refresh cloud authentication and try again.",
+        delete_source_key="gst",
+        delete_confirm_key="confirm_delete_gstr_upload",
+        delete_callback=delete_gstr_upload,
     )
     generate_gst_ai = st.checkbox(
         "Generate Vertex AI insights",
@@ -881,8 +1128,14 @@ with gst_tab:
         key="generate_gst_ai_insights",
         help="Rule-based matching runs fastest. Enable Vertex AI for up to 10 unique exception explanations.",
     )
+    run_gst_clicked = st.button(
+        "Run GST Reconciliation",
+        type="primary",
+        use_container_width=True,
+        disabled=selected_gst_upload is None,
+    )
 
-    if st.button("Run GST Reconciliation", type="primary", use_container_width=True, disabled=selected_gst_upload is None):
+    if run_gst_clicked:
         progress_bar = st.progress(0)
         status_placeholder = st.empty()
         stage_callback = _gst_stage_callback(progress_bar, status_placeholder)
@@ -959,14 +1212,9 @@ with gst_tab:
                 st.dataframe(_gst_review_dataframe(selected_gst_rows), use_container_width=True, hide_index=True)
         with technical_tab:
             st.dataframe(_gst_technical_audit_dataframe(gst_result["results"]), use_container_width=True, hide_index=True)
-    elif gst_error:
+    elif gst_error and selected_gst_upload is not None:
         section_card(
             "GST Reconciliation Not Completed",
             body_html="<p>The GST reconciliation could not run. Upload GSTR data and ensure BigQuery credentials are available.</p>",
         )
         st.error(gst_error)
-    else:
-        section_card(
-            "Ready to Run",
-            body_html="<p>Click the button above after uploading GSTR data.</p>",
-        )

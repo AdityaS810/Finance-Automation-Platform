@@ -94,6 +94,8 @@ with bank_tab:
                     )
                 else:
                     st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
+                print(f"[Uploads UI] PDF parser extracted row count: {len(bank_df.index)}")
+                print(f"[Uploads UI] First 5 parsed bank rows: {bank_df.head(5).to_dict(orient='records')}")
                 if bank_df.attrs.get("parser_warning"):
                     st.warning(bank_df.attrs["parser_warning"])
 
@@ -122,6 +124,8 @@ with bank_tab:
             )
 
             st.dataframe(bank_df.head(20), use_container_width=True, hide_index=True)
+            if uploaded_bank_file.name.lower().endswith(".pdf"):
+                st.caption(f"Parser extracted row count: {len(bank_df.index)}")
 
             if st.button("Save Bank Data", key="save_bank_data", use_container_width=True):
                 if not validation_result["is_valid"]:
@@ -132,6 +136,8 @@ with bank_tab:
                         result = save_bank_statement_upload(bank_df_to_save, uploaded_bank_file.name)
                         st.session_state["bank_upload_result"] = result
                         st.success(result["message"])
+                        st.info(f"Rows saved count: {result['records_parsed']}")
+                        print(f"[Uploads UI] Bank rows saved count: {result['records_parsed']}")
                     except Exception as error:
                         st.error(f"Bank upload failed: {error}")
 

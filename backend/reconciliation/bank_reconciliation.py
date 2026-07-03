@@ -24,6 +24,7 @@ BANK_LINES_VIEW = "finance_silver.fact_bank_statement_lines"
 ACCOUNTING_INPUT_VIEW = "finance_gold.bank_reconciliation_input"
 AMOUNT_TOLERANCE = 1.0
 DATE_TOLERANCE_DAYS = 3
+BANK_CHARGE_DATE_TOLERANCE_DAYS = 5
 MATCHED_THRESHOLD = 0.78
 POSSIBLE_MATCH_THRESHOLD = 0.50
 BANK_NOT_IN_BOOKS_REASON = "Bank statement transaction was not found in accounting records."
@@ -137,6 +138,24 @@ def _text_similarity(left: str, right: str) -> float:
     return max(sequence_score, token_score)
 
 
+def _is_bank_charge_text(value: Any) -> bool:
+    """Return True for common bank charge text variants."""
+    normalised_text = _normalise_text(value)
+    if not normalised_text:
+        return False
+    charge_markers = [
+        "bank charge",
+        "bank charges",
+        "balance based chg",
+        "balance based chgs",
+        "balance based charge",
+        "balance based charges",
+        "charges",
+        "chgs",
+    ]
+    return any(marker in normalised_text for marker in charge_markers)
+
+
 def _date_difference_days(left_date: Any, right_date: Any) -> int | None:
     """Return absolute day difference between two dates, or None if invalid."""
     left = pd.to_datetime(left_date, errors="coerce")
@@ -146,20 +165,47 @@ def _date_difference_days(left_date: Any, right_date: Any) -> int | None:
     return abs((left.date() - right.date()).days)
 
 
+def _accounting_search_text(accounting_row: pd.Series) -> str:
+    """Return accounting-side text used for matching."""
+    return " ".join(
+        str(accounting_row.get(column_name, "") or "")
+        for column_name in ["accounting_party_name", "reference_number", "transaction_number", "transaction_type"]
+    )
+
+
+def _is_bank_charge_candidate(bank_row: pd.Series, accounting_row: pd.Series) -> bool:
+    """Allow conservative review matching for bank charges with opposite signs."""
+    bank_amount = float(bank_row.get("bank_amount", 0) or 0)
+    accounting_amount = float(accounting_row.get("accounting_amount", 0) or 0)
+    if abs(abs(bank_amount) - abs(accounting_amount)) > AMOUNT_TOLERANCE:
+        return False
+
+    date_difference = _date_difference_days(bank_row.get("bank_date"), accounting_row.get("accounting_date"))
+    if date_difference is None or date_difference > BANK_CHARGE_DATE_TOLERANCE_DAYS:
+        return False
+
+    return _is_bank_charge_text(bank_row.get("bank_narration", "")) and _is_bank_charge_text(_accounting_search_text(accounting_row))
+
+
 def _candidate_score(bank_row: pd.Series, accounting_row: pd.Series) -> tuple[float, str]:
     """Score one bank/accounting candidate pair and explain the result."""
     bank_amount = float(bank_row.get("bank_amount", 0) or 0)
     accounting_amount = float(accounting_row.get("accounting_amount", 0) or 0)
+    date_difference = _date_difference_days(bank_row.get("bank_date"), accounting_row.get("accounting_date"))
+
+    if _is_bank_charge_candidate(bank_row, accounting_row):
+        return (
+            0.74,
+            "bank charge amount matched by absolute value; date within "
+            f"{date_difference} day(s); charge text is similar; review before confirming",
+        )
+
     amount_difference = abs(bank_amount - accounting_amount)
     amount_score = 1.0 if amount_difference <= AMOUNT_TOLERANCE else max(0.0, 1 - (amount_difference / max(abs(bank_amount), 1)))
 
-    date_difference = _date_difference_days(bank_row.get("bank_date"), accounting_row.get("accounting_date"))
     date_score = 0.0 if date_difference is None else max(0.0, 1 - (date_difference / (DATE_TOLERANCE_DAYS + 1)))
 
-    accounting_text = " ".join(
-        str(accounting_row.get(column_name, "") or "")
-        for column_name in ["accounting_party_name", "reference_number", "transaction_number", "transaction_type"]
-    )
+    accounting_text = _accounting_search_text(accounting_row)
     text_score = _text_similarity(str(bank_row.get("bank_narration", "")), accounting_text)
     confidence = round((amount_score * 0.45) + (date_score * 0.25) + (text_score * 0.30), 4)
 
@@ -209,9 +255,10 @@ def reconcile_bank_data(bank_lines_df: pd.DataFrame, accounting_df: pd.DataFrame
 
             date_difference = _date_difference_days(bank_row.get("bank_date"), accounting_row.get("accounting_date"))
             amount_difference = abs(float(bank_row["bank_amount"]) - float(accounting_row["accounting_amount"]))
+            is_bank_charge_candidate = _is_bank_charge_candidate(bank_row, accounting_row)
             if amount_difference > max(abs(float(bank_row["bank_amount"])) * 0.15, AMOUNT_TOLERANCE) and (
                 date_difference is None or date_difference > DATE_TOLERANCE_DAYS
-            ):
+            ) and not is_bank_charge_candidate:
                 continue
 
             score, reason = _candidate_score(bank_row, accounting_row)
@@ -443,7 +490,7 @@ def _prepare_accounting_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
         else working_df.get("transaction_amount", 0)
     )
 
-    return pd.DataFrame(
+    prepared_df = pd.DataFrame(
         {
             "accounting_record_id": _text_series(working_df, accounting_record_id),
             "accounting_date": pd.to_datetime(_value_series(working_df, accounting_date), errors="coerce").dt.date.astype(str),
@@ -452,8 +499,42 @@ def _prepare_accounting_lines(dataframe: pd.DataFrame) -> pd.DataFrame:
             "transaction_number": _text_series(working_df, working_df.get("transaction_number", "")),
             "transaction_type": _text_series(working_df, working_df.get("transaction_type", "")),
             "accounting_amount": pd.to_numeric(_value_series(working_df, accounting_amount), errors="coerce").fillna(0),
+            "source_record_id": _text_series(working_df, working_df.get("source_record_id", "")),
+            "source_line_id": _text_series(working_df, working_df.get("source_line_id", "")),
+            "source_type": _text_series(working_df, working_df.get("source_type", "")),
         }
     )
+    prepared_df = prepared_df.assign(
+        accounting_amount_key=prepared_df["accounting_amount"].round(2),
+        normalised_party=prepared_df["accounting_party_name"].map(_normalise_text),
+        normalised_reference=prepared_df["reference_number"].map(_normalise_text),
+        normalised_transaction_number=prepared_df["transaction_number"].map(_normalise_text),
+        normalised_transaction_type=prepared_df["transaction_type"].map(_normalise_text),
+    )
+    prepared_df = prepared_df.drop_duplicates(
+        subset=[
+            "accounting_record_id",
+            "source_record_id",
+            "source_line_id",
+            "source_type",
+            "accounting_date",
+            "accounting_amount_key",
+            "normalised_party",
+            "normalised_reference",
+            "normalised_transaction_number",
+            "normalised_transaction_type",
+        ],
+        keep="first",
+    )
+    return prepared_df.drop(
+        columns=[
+            "accounting_amount_key",
+            "normalised_party",
+            "normalised_reference",
+            "normalised_transaction_number",
+            "normalised_transaction_type",
+        ]
+    ).reset_index(drop=True)
 
 
 def _numeric_series(dataframe: pd.DataFrame, column_name: str) -> pd.Series:

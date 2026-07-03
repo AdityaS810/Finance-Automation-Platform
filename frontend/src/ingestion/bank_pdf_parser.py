@@ -12,8 +12,27 @@ import pandas as pd
 
 REQUIRED_COLUMNS = ["date", "narration", "debit", "credit", "balance_amount"]
 MONTH_PATTERN = r"(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)"
-DATE_PATTERN = re.compile(rf"^({MONTH_PATTERN}\s+\d{{1,2}}\s+\d{{4}})\b", re.IGNORECASE)
-AMOUNT_PATTERN = re.compile(r"(?<![A-Za-z0-9])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?![A-Za-z0-9])")
+DATE_SEPARATOR_PATTERN = r"[\s-]+"
+MONTH_FIRST_DATE_PATTERN = re.compile(
+    rf"^({MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{1,2}}{DATE_SEPARATOR_PATTERN}\d{{4}})\b",
+    re.IGNORECASE,
+)
+DAY_FIRST_DATE_PATTERN = re.compile(
+    rf"^(\d{{1,2}}{DATE_SEPARATOR_PATTERN}{MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{4}})\b",
+    re.IGNORECASE,
+)
+EMBEDDED_MONTH_FIRST_DATE_PATTERN = re.compile(
+    rf"\b({MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{1,2}}{DATE_SEPARATOR_PATTERN}\d{{4}})\b",
+    re.IGNORECASE,
+)
+EMBEDDED_DAY_FIRST_DATE_PATTERN = re.compile(
+    rf"\b(\d{{1,2}}{DATE_SEPARATOR_PATTERN}{MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{4}})\b",
+    re.IGNORECASE,
+)
+AMOUNT_PATTERN = re.compile(
+    r"(?<![A-Za-z0-9])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?:[-+]|\s?(?:CR|DR))?(?![A-Za-z0-9])",
+    re.IGNORECASE,
+)
 REFERENCE_PATTERN = re.compile(r"\b[A-Z]{2,}[A-Z0-9-]{4,}\b")
 INCOMPLETE_EXTRACTION_PAGE_THRESHOLD = 20
 INCOMPLETE_EXTRACTION_ROW_THRESHOLD = 100
@@ -41,15 +60,21 @@ def _parse_amount(value: Any) -> float | None:
     if not cleaned_value:
         return None
 
+    is_trailing_negative = cleaned_value.endswith("-")
+    cleaned_value = cleaned_value.rstrip("+-")
+    cleaned_value = re.sub(r"(?:CR|DR)$", "", cleaned_value, flags=re.IGNORECASE).strip()
+
     try:
-        return float(cleaned_value)
+        amount = float(cleaned_value)
+        return -amount if is_trailing_negative else amount
     except ValueError:
         return None
 
 
 def _is_date_line(text: str) -> bool:
     """Return True when a PDF text line starts with an HSBC date."""
-    return bool(DATE_PATTERN.match(text.strip()))
+    stripped_text = text.strip()
+    return bool(MONTH_FIRST_DATE_PATTERN.match(stripped_text) or DAY_FIRST_DATE_PATTERN.match(stripped_text))
 
 
 def _clean_narration(value: str) -> str:
@@ -189,11 +214,40 @@ def _amount_tokens_for_line(line: StatementLine) -> list[dict[str, Any]]:
 def _strip_date_prefix(text: str) -> tuple[str | None, str]:
     """Return a detected date and the rest of the line text."""
     stripped_text = text.strip()
-    date_match = DATE_PATTERN.match(stripped_text)
-    if not date_match:
-        return None, stripped_text
+    date_match = MONTH_FIRST_DATE_PATTERN.match(stripped_text)
+    if date_match:
+        return date_match.group(1).replace("-", " "), stripped_text[date_match.end() :].strip()
 
-    return date_match.group(1), stripped_text[date_match.end() :].strip()
+    date_match = DAY_FIRST_DATE_PATTERN.match(stripped_text)
+    if date_match:
+        parsed_date = pd.to_datetime(date_match.group(1).replace("-", " "), format="%d %b %Y", errors="coerce")
+        if not pd.isna(parsed_date):
+            return parsed_date.strftime("%b %d %Y"), stripped_text[date_match.end() :].strip()
+
+    return None, stripped_text
+
+
+def _extract_embedded_date(text: str) -> tuple[str | None, str]:
+    """Return a transaction date embedded before the amount columns, plus text without it."""
+    stripped_text = text.strip()
+    amount_match = AMOUNT_PATTERN.search(stripped_text)
+    search_end = amount_match.start() if amount_match else len(stripped_text)
+    search_window = stripped_text[:search_end]
+
+    date_match = EMBEDDED_MONTH_FIRST_DATE_PATTERN.search(search_window)
+    if date_match:
+        date_text = date_match.group(1).replace("-", " ")
+        cleaned_text = (stripped_text[: date_match.start()] + stripped_text[date_match.end() :]).strip()
+        return date_text, _clean_narration(cleaned_text)
+
+    date_match = EMBEDDED_DAY_FIRST_DATE_PATTERN.search(search_window)
+    if date_match:
+        parsed_date = pd.to_datetime(date_match.group(1).replace("-", " "), format="%d %b %Y", errors="coerce")
+        if not pd.isna(parsed_date):
+            cleaned_text = (stripped_text[: date_match.start()] + stripped_text[date_match.end() :]).strip()
+            return parsed_date.strftime("%b %d %Y"), _clean_narration(cleaned_text)
+
+    return None, stripped_text
 
 
 def _remove_trailing_amounts(text: str) -> str:
@@ -275,10 +329,11 @@ def _classify_line_amounts(
         credit_balance_boundary = (credit_x + balance_x) / 2 if credit_x is not None else balance_x - 20
         debit_credit_boundary = (debit_x + credit_x) / 2 if debit_x is not None and credit_x is not None else None
         balance_tokens = [token for token in tokens_with_x if float(token["x0"]) >= credit_balance_boundary]
-        balance_token = balance_tokens[-1] if balance_tokens else tokens_with_x[-1]
-        fields["balance_amount"] = _parse_amount(balance_token["value"])
+        balance_token = balance_tokens[-1] if balance_tokens else None
+        if balance_token:
+            fields["balance_amount"] = _parse_amount(balance_token["value"])
 
-        transaction_tokens = [token for token in tokens_with_x if token is not balance_token]
+        transaction_tokens = [token for token in tokens_with_x if balance_token is None or token is not balance_token]
         if transaction_tokens:
             transaction_token = transaction_tokens[-1]
             transaction_amount = _parse_amount(transaction_token["value"])
@@ -341,6 +396,13 @@ def _build_debug_summary(pages_processed: int, transactions: list[dict[str, Any]
     }
 
 
+def _debug_first_rows(dataframe: pd.DataFrame, row_count: int = 5) -> list[dict[str, Any]]:
+    """Return a terminal-friendly preview of parsed bank rows."""
+    if dataframe.empty:
+        return []
+    return dataframe.head(row_count).astype({"date": "string"}).to_dict(orient="records")
+
+
 def _incomplete_extraction_warning(pages_processed: int, rows_extracted: int) -> str | None:
     """Return a non-blocking warning when a large PDF yields suspiciously few rows."""
     if pages_processed <= INCOMPLETE_EXTRACTION_PAGE_THRESHOLD or rows_extracted >= INCOMPLETE_EXTRACTION_ROW_THRESHOLD:
@@ -350,6 +412,106 @@ def _incomplete_extraction_warning(pages_processed: int, rows_extracted: int) ->
         "[Bank PDF Parser] Extraction may be incomplete: "
         f"{rows_extracted} rows from {pages_processed} pages."
     )
+
+
+def _transactions_from_statement_lines(
+    statement_lines: list[StatementLine],
+    column_positions: dict[str, float],
+) -> list[dict[str, Any]]:
+    """Parse visual statement lines into transaction rows.
+
+    HSBC PDFs can keep the date on the first line of a group while placing
+    amount and ledger balance on a later line. The current date therefore stays
+    active, while narration is scoped to the transaction being built.
+    """
+    transactions: list[dict[str, Any]] = []
+    current_date: str | None = None
+    narration_parts: list[str] = []
+    pending_transaction_amount: dict[str, float] | None = None
+
+    for line in statement_lines:
+        detected_date, line_text_without_date = _strip_date_prefix(line.text)
+        if detected_date:
+            if current_date and detected_date != current_date and narration_parts:
+                narration_parts = []
+                pending_transaction_amount = None
+            current_date = detected_date
+
+        embedded_date, line_text_without_embedded_date = _extract_embedded_date(line_text_without_date)
+        if embedded_date:
+            if current_date != embedded_date and narration_parts:
+                narration_parts = []
+                pending_transaction_amount = None
+            current_date = embedded_date
+            line_text_without_date = line_text_without_embedded_date
+
+        if not current_date:
+            continue
+
+        line_narration = _remove_trailing_amounts(line_text_without_date)
+        amount_tokens = _amount_tokens_for_line(line)
+        line_amounts = _classify_line_amounts(amount_tokens, line_narration, column_positions)
+
+        if line_narration:
+            narration_parts.append(line_narration)
+
+        accumulated_narration = _clean_narration(" ".join(narration_parts))
+        is_opening_balance = bool(re.search(r"\bbalance\s+b/?f\b", accumulated_narration, re.IGNORECASE))
+        has_balance = line_amounts["balance_amount"] is not None
+        has_transaction_amount = bool(line_amounts["has_transaction_amount"])
+
+        if is_opening_balance and has_balance:
+            row = _build_transaction_row(
+                current_date,
+                narration_parts,
+                0.0,
+                0.0,
+                line_amounts["balance_amount"],
+                narration_override="BALANCE B/F",
+            )
+            if row:
+                transactions.append(row)
+            narration_parts = []
+            pending_transaction_amount = None
+            continue
+
+        if has_transaction_amount and has_balance:
+            narration = _remove_trailing_amounts(accumulated_narration)
+            row = _build_transaction_row(
+                current_date,
+                [narration],
+                line_amounts["debit"],
+                line_amounts["credit"],
+                line_amounts["balance_amount"],
+            )
+            if row:
+                transactions.append(row)
+            narration_parts = []
+            pending_transaction_amount = None
+            continue
+
+        if has_transaction_amount:
+            pending_transaction_amount = {
+                "debit": float(line_amounts["debit"] or 0.0),
+                "credit": float(line_amounts["credit"] or 0.0),
+            }
+            continue
+
+        if pending_transaction_amount and has_balance:
+            narration = _remove_trailing_amounts(accumulated_narration)
+            row = _build_transaction_row(
+                current_date,
+                [narration],
+                pending_transaction_amount["debit"],
+                pending_transaction_amount["credit"],
+                line_amounts["balance_amount"],
+            )
+            if row:
+                transactions.append(row)
+            narration_parts = []
+            pending_transaction_amount = None
+
+    return transactions
 
 
 def _parse_transaction(
@@ -362,7 +524,8 @@ def _parse_transaction(
         return None
 
     combined_text = _clean_narration(" ".join(line.text for line in lines))
-    narration_text = DATE_PATTERN.sub("", combined_text, count=1).strip()
+    narration_text = MONTH_FIRST_DATE_PATTERN.sub("", combined_text, count=1).strip()
+    narration_text = DAY_FIRST_DATE_PATTERN.sub("", narration_text, count=1).strip()
     amount_tokens = _amount_tokens(lines)
 
     balance_amount = _parse_amount(amount_tokens[-1]["value"]) if amount_tokens else None
@@ -410,61 +573,13 @@ def parse_bank_pdf(uploaded_file) -> pd.DataFrame:
             column_positions.update({key: value for key, value in page_column_positions.items() if key not in column_positions})
             statement_lines.extend(line for line in page_lines if not _is_ignored_line(line.text))
 
-    transactions: list[dict[str, Any]] = []
-    current_date: str | None = None
-    narration_parts: list[str] = []
-
-    for line in statement_lines:
-        detected_date, line_text_without_date = _strip_date_prefix(line.text)
-        if detected_date:
-            current_date = detected_date
-
-        if not current_date:
-            continue
-
-        line_narration = _remove_trailing_amounts(line_text_without_date)
-        amount_tokens = _amount_tokens_for_line(line)
-        line_amounts = _classify_line_amounts(amount_tokens, line_narration, column_positions)
-
-        if line_narration:
-            narration_parts.append(line_narration)
-
-        accumulated_narration = _clean_narration(" ".join(narration_parts))
-        is_opening_balance = bool(re.search(r"\bbalance\s+b/?f\b", accumulated_narration, re.IGNORECASE))
-        has_balance = line_amounts["balance_amount"] is not None
-        has_transaction_amount = bool(line_amounts["has_transaction_amount"])
-
-        if is_opening_balance and has_balance:
-            row = _build_transaction_row(
-                current_date,
-                narration_parts,
-                0.0,
-                0.0,
-                line_amounts["balance_amount"],
-                narration_override="BALANCE B/F",
-            )
-            if row:
-                transactions.append(row)
-            narration_parts = []
-            continue
-
-        if has_transaction_amount and has_balance:
-            narration = _remove_trailing_amounts(accumulated_narration)
-            row = _build_transaction_row(
-                current_date,
-                [narration],
-                line_amounts["debit"],
-                line_amounts["credit"],
-                line_amounts["balance_amount"],
-            )
-            if row:
-                transactions.append(row)
-            narration_parts = []
+    transactions = _transactions_from_statement_lines(statement_lines, column_positions)
 
     if not transactions:
         print("[Bank PDF Parser] No transactions found in uploaded PDF.")
         parsed_df = _empty_dataframe()
         parsed_df.attrs["parser_debug_summary"] = _build_debug_summary(pages_processed, transactions)
+        parsed_df.attrs["parser_first_rows"] = []
         warning_message = _incomplete_extraction_warning(pages_processed, 0)
         if warning_message:
             logger.warning(warning_message)
@@ -479,8 +594,11 @@ def parse_bank_pdf(uploaded_file) -> pd.DataFrame:
 
     debug_summary = _build_debug_summary(pages_processed, transactions)
     parsed_df.attrs["parser_debug_summary"] = debug_summary
+    parsed_df.attrs["parser_first_rows"] = _debug_first_rows(parsed_df)
     logger.info("[Bank PDF Parser] Summary: %s", debug_summary)
     print(f"[Bank PDF Parser] Summary: {debug_summary}")
+    print(f"[Bank PDF Parser] Extracted rows: {len(parsed_df.index)}")
+    print(f"[Bank PDF Parser] First parsed rows: {parsed_df.attrs['parser_first_rows']}")
     warning_message = _incomplete_extraction_warning(pages_processed, len(parsed_df.index))
     if warning_message:
         logger.warning(warning_message)

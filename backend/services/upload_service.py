@@ -29,6 +29,9 @@ GSTR_MONEY_COLUMNS = [
     "total_tax",
     "total_amount",
 ]
+FILE_UPLOADS_TABLE = "finance_bronze.file_uploads"
+BANK_LINES_TABLE = "finance_silver.fact_bank_statement_lines"
+GSTR_LINES_TABLE = "finance_silver.fact_gstr_lines"
 
 
 def _require_environment_variables(variable_names: list[str]) -> tuple[str, str]:
@@ -39,6 +42,79 @@ def _require_environment_variables(variable_names: list[str]) -> tuple[str, str]
         )
 
     return os.getenv("GCP_PROJECT_ID", ""), os.getenv("GCS_RAW_BUCKET", "")
+
+
+def _table_name(project_id: str, table_name: str) -> str:
+    """Return a quoted BigQuery table name."""
+    return f"`{project_id}.{table_name}`"
+
+
+def _delete_rows_by_upload_id(client: bigquery.Client, table_name: str, upload_id: str) -> int:
+    """Delete rows for one upload_id from one BigQuery table."""
+    query = f"""
+        DELETE FROM {table_name}
+        WHERE upload_id = @upload_id
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[bigquery.ScalarQueryParameter("upload_id", "STRING", upload_id)]
+    )
+    query_job = client.query(query, job_config=job_config)
+    query_job.result()
+    return int(query_job.num_dml_affected_rows or 0)
+
+
+def _delete_upload_tracking_row(client: bigquery.Client, project_id: str, upload_id: str, file_type: str) -> int:
+    """Delete the upload registry row for one selected uploaded file."""
+    query = f"""
+        DELETE FROM {_table_name(project_id, FILE_UPLOADS_TABLE)}
+        WHERE upload_id = @upload_id
+          AND file_type = @file_type
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("upload_id", "STRING", upload_id),
+            bigquery.ScalarQueryParameter("file_type", "STRING", file_type),
+        ]
+    )
+    query_job = client.query(query, job_config=job_config)
+    query_job.result()
+    return int(query_job.num_dml_affected_rows or 0)
+
+
+def _delete_uploaded_input_rows(upload_id: str, source_table: str, file_type: str) -> dict:
+    """Delete one uploaded reconciliation input from BigQuery storage."""
+    if not str(upload_id or "").strip():
+        raise ValueError("Upload ID is required.")
+
+    project_id, _bucket_name = _require_environment_variables(["GCP_PROJECT_ID"])
+    client = bigquery.Client(project=project_id)
+    cleaned_upload_id = str(upload_id).strip()
+
+    input_rows_deleted = _delete_rows_by_upload_id(
+        client,
+        _table_name(project_id, source_table),
+        cleaned_upload_id,
+    )
+    tracking_rows_deleted = _delete_upload_tracking_row(client, project_id, cleaned_upload_id, file_type)
+
+    return {
+        "status": "success",
+        "message": "Upload deleted successfully.",
+        "upload_id": cleaned_upload_id,
+        "source_type": file_type,
+        "input_rows_deleted": input_rows_deleted,
+        "tracking_rows_deleted": tracking_rows_deleted,
+    }
+
+
+def delete_bank_upload(upload_id: str) -> dict:
+    """Delete only the selected bank statement upload rows."""
+    return _delete_uploaded_input_rows(upload_id, BANK_LINES_TABLE, "bank_statement")
+
+
+def delete_gstr_upload(upload_id: str) -> dict:
+    """Delete only the selected GSTR upload rows."""
+    return _delete_uploaded_input_rows(upload_id, GSTR_LINES_TABLE, "gstr")
 
 
 def _get_optional_string_column(dataframe: pd.DataFrame, column_name: str, default_value: str = "") -> pd.Series:
@@ -134,6 +210,8 @@ def save_bank_statement_upload(
         raise ValueError("Bank statement is missing columns: " + ", ".join(missing_columns))
 
     working_df = dataframe.copy()
+    print(f"[Upload Service] Bank upload input rows: {len(working_df.index)}")
+    print(f"[Upload Service] First 5 bank upload rows: {working_df.head(5).to_dict(orient='records')}")
     working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
     if working_df["date"].isna().any():
         raise ValueError("Bank statement contains invalid values in the date column.")
@@ -157,6 +235,7 @@ def save_bank_statement_upload(
     working_df["reference_number"] = _get_optional_string_column(working_df, "reference_number")
 
     records = working_df.to_dict(orient="records")
+    print(f"[Upload Service] Bank rows prepared for save: {len(records)}")
     gcs_path = f"raw/bank_statements/upload_id={upload_id}/{original_file_name.rsplit('.', 1)[0]}.json"
     full_gcs_path = upload_json_to_gcs(
         bucket_name=bucket_name,
