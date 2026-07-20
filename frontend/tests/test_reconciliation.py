@@ -5,6 +5,8 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
+import backend.reconciliation.bank_reconciliation as bank_reconciliation
+import backend.reconciliation.gst_reconciliation as gst_reconciliation
 from backend.ai.reconciliation_insights import _parse_ai_response, _rule_based_insight
 from backend.reconciliation.bank_reconciliation import run_bank_reconciliation
 from backend.reconciliation.gst_reconciliation import reconcile_gst_data, run_gst_reconciliation
@@ -407,6 +409,13 @@ def test_bank_reconciliation_matches_and_exports_excel(workspace_tmp_path):
     accounting_ids = result["results"].loc[result["results"]["accounting_record_id"] != "", "accounting_record_id"]
     assert accounting_ids.is_unique
     assert {"ai_summary", "ai_recommendation", "ai_risk_level"}.issubset(result["results"].columns)
+    assert {
+        "gemini_suggestion",
+        "gemini_confidence",
+        "gemini_reason",
+        "gemini_recommendation",
+        "gemini_candidate_id",
+    }.issubset(result["results"].columns)
     assert {"selected_upload_id", "selected_file_name", "reconciliation_timestamp"}.issubset(result["results"].columns)
     assert set(result["results"]["selected_upload_id"]) == {"bank-upload-1"}
     review_rows = result["results"][result["results"]["match_status"].isin(["possible_match", "unmatched"])]
@@ -414,6 +423,30 @@ def test_bank_reconciliation_matches_and_exports_excel(workspace_tmp_path):
     assert result["ai_status"] in {"enabled", "unavailable", "not_required"}
     assert result["export_path"].name == "bank_reconciliation_results.xlsx"
     assert result["export_path"].exists()
+
+
+def test_bank_gemini_missing_config_falls_back_without_changing_statuses(monkeypatch, workspace_tmp_path):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    baseline = bank_reconciliation.reconcile_bank_data(_bank_lines_df(), _accounting_df())
+
+    result = run_bank_reconciliation(
+        workspace_tmp_path,
+        bank_lines_df=_bank_lines_df(),
+        accounting_df=_accounting_df(),
+        generate_ai_insights=False,
+        use_gemini_suggestions=True,
+    )
+
+    assert result["results"]["match_status"].tolist() == baseline["match_status"].tolist()
+    review_mask = result["results"]["match_status"].isin(bank_reconciliation.GEMINI_BANK_REVIEW_STATUSES)
+    review_rows = result["results"][review_mask]
+    matched_rows = result["results"][result["results"]["match_status"] == "matched"]
+    assert not review_rows.empty
+    assert set(review_rows["gemini_suggestion"]) == {"needs_manual_review"}
+    assert set(review_rows["gemini_confidence"]) == {"low"}
+    assert set(review_rows["gemini_reason"]) == {"Gemini suggestions are not configured."}
+    assert matched_rows["gemini_suggestion"].eq("").all()
 
 
 def test_bank_reconciliation_deduplicates_accounting_books_only_rows(workspace_tmp_path):
@@ -534,6 +567,13 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
     assert len(result["results"].index) == 7
     assert not result["results"].empty
     assert {"ai_summary", "ai_recommendation", "ai_risk_level"}.issubset(result["results"].columns)
+    assert {
+        "gemini_suggestion",
+        "gemini_confidence",
+        "gemini_reason",
+        "gemini_recommendation",
+        "gemini_candidate_id",
+    }.issubset(result["results"].columns)
     assert {
         "match_status",
         "status_label",
@@ -706,6 +746,35 @@ def test_gst_reconciliation_matches_mismatches_and_exports_excel(workspace_tmp_p
         "gstr_raw_ids",
         "books_raw_ids",
     }.issubset(technical_audit_sheet.columns)
+
+
+def test_gst_gemini_missing_config_falls_back_without_changing_statuses(monkeypatch, workspace_tmp_path):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    baseline = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_gstr_lines_df(),
+        books_gst_df=_books_gst_df(),
+        generate_ai_insights=False,
+    )
+
+    result = run_gst_reconciliation(
+        workspace_tmp_path,
+        gstr_lines_df=_gstr_lines_df(),
+        books_gst_df=_books_gst_df(),
+        generate_ai_insights=False,
+        use_gemini_suggestions=True,
+    )
+
+    assert result["results"]["match_status"].tolist() == baseline["results"]["match_status"].tolist()
+    review_mask = result["results"]["match_status"].isin(gst_reconciliation.GEMINI_GST_REVIEW_STATUSES)
+    review_rows = result["results"][review_mask]
+    matched_rows = result["results"][result["results"]["match_status"] == "matched"]
+    assert not review_rows.empty
+    assert set(review_rows["gemini_suggestion"]) == {"needs_manual_review"}
+    assert set(review_rows["gemini_confidence"]) == {"low"}
+    assert set(review_rows["gemini_reason"]) == {"Gemini suggestions are not configured."}
+    assert matched_rows["gemini_suggestion"].eq("").all()
 
 
 def test_gst_reconciliation_does_not_treat_null_books_tax_as_zero(workspace_tmp_path):

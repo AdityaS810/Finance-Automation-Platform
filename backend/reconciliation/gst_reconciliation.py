@@ -19,6 +19,10 @@ from backend.reconciliation.upload_registry import (
     query_to_dataframe,
     table_name,
 )
+from backend.services.gemini_reconciliation_service import (
+    FALLBACK_SUGGESTION,
+    suggest_reconciliation_match,
+)
 
 
 GSTR_LINES_VIEW = "finance_silver.fact_gstr_lines"
@@ -30,6 +34,18 @@ SUPPLIER_NAME_SIMILARITY = 0.82
 STRICT_FORMAT_DATE_TOLERANCE_DAYS = 0
 GSTR_PERIOD_ERROR = "Could not determine GSTR period from uploaded invoice dates."
 AI_COLUMNS = ["ai_summary", "ai_recommendation", "ai_risk_level"]
+GEMINI_GST_REVIEW_STATUSES = {
+    "missing_in_books",
+    "missing_in_gstr",
+    "amount_mismatch",
+    "tax_component_mismatch",
+    "tax_type_mismatch",
+    "review_match",
+    "possible_match",
+    "unmatched",
+}
+GEMINI_OUTPUT_COLUMNS = list(FALLBACK_SUGGESTION)
+MAX_GEMINI_CANDIDATES = 5
 STATUS_SORT_ORDER = {
     "amount_mismatch": 0,
     "mismatch": 0,
@@ -71,6 +87,10 @@ POSSIBLE_MATCH_COLUMNS = [
     "difference_amount",
     "match_reason",
     "action_required",
+    "gemini_suggestion",
+    "gemini_confidence",
+    "gemini_reason",
+    "gemini_recommendation",
 ]
 FINANCE_COLUMNS = [
     "status_label",
@@ -113,6 +133,10 @@ FINANCE_COLUMNS = [
     "ai_summary",
     "ai_recommendation",
     "ai_risk_level",
+    "gemini_suggestion",
+    "gemini_confidence",
+    "gemini_reason",
+    "gemini_recommendation",
     "selected_upload_id",
     "selected_file_name",
     "reconciliation_timestamp",
@@ -151,6 +175,7 @@ TECHNICAL_AUDIT_COLUMNS = FINANCE_COLUMNS + [
     "loaded_at",
     "gstr_raw_rows",
     "books_raw_rows",
+    "gemini_candidate_id",
 ]
 
 
@@ -1743,6 +1768,165 @@ def _add_run_metadata(
     return enriched_df
 
 
+def add_gst_gemini_suggestions(results: pd.DataFrame, books_gst_df: pd.DataFrame) -> pd.DataFrame:
+    """Add advisory Gemini fields only to GST rows requiring finance review.
+
+    Gemini output is copied only into dedicated suggestion columns. The
+    deterministic ``match_status`` remains untouched.
+    """
+    enriched_df = _ensure_gemini_columns(results)
+    prepared_books_df = _prepare_books_gst_lines(books_gst_df)
+
+    if "match_status" not in enriched_df.columns:
+        return enriched_df
+
+    review_mask = enriched_df["match_status"].fillna("").astype(str).isin(GEMINI_GST_REVIEW_STATUSES)
+    for row_index in enriched_df.index[review_mask]:
+        row = enriched_df.loc[row_index]
+        suggestion = suggest_reconciliation_match(
+            _gst_gemini_row_context(row),
+            _gst_gemini_candidate_context(row, prepared_books_df),
+            recon_type="gst",
+        )
+        for column_name in GEMINI_OUTPUT_COLUMNS:
+            enriched_df.at[row_index, column_name] = suggestion.get(
+                column_name,
+                FALLBACK_SUGGESTION[column_name],
+            )
+
+    return enriched_df
+
+
+def _ensure_gemini_columns(results: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with stable Gemini suggestion columns."""
+    enriched_df = results.copy()
+    for column_name in GEMINI_OUTPUT_COLUMNS:
+        if column_name not in enriched_df.columns:
+            enriched_df[column_name] = ""
+    return enriched_df
+
+
+def _gst_gemini_row_context(row: pd.Series) -> dict[str, Any]:
+    """Expose only bounded invoice and tax fields from the GST result row."""
+    return {
+        "gstin": _first_limited_context_value(row, ["gstr_gstin", "gstin", "zoho_gstin"]),
+        "invoice_number": _first_limited_context_value(
+            row,
+            ["gstr_invoice_number", "invoice_number", "zoho_invoice_number"],
+        ),
+        "invoice_date": _first_limited_context_value(
+            row,
+            ["gstr_invoice_date", "invoice_date", "zoho_invoice_date"],
+        ),
+        "taxable_value": _first_limited_context_value(
+            row,
+            ["taxable_value_gstr", "gstr_taxable_value", "taxable_value_books", "zoho_taxable_value"],
+        ),
+        "igst": _first_limited_context_value(row, ["igst_gstr", "igst_books"]),
+        "cgst": _first_limited_context_value(row, ["cgst_gstr", "cgst_books"]),
+        "sgst": _first_limited_context_value(row, ["sgst_gstr", "sgst_books"]),
+        "total_tax_amount": _first_limited_context_value(row, ["tax_amount_gstr", "tax_amount_books"]),
+    }
+
+
+def _gst_gemini_candidate_context(
+    result_row: pd.Series,
+    books_df: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """Return at most five relevant, limited books invoice candidates."""
+    if books_df.empty:
+        return []
+
+    existing_candidate_id = str(result_row.get("books_record_id", "") or "").strip()
+    status = str(result_row.get("match_status", "") or "")
+    ranked_candidates: list[tuple[bool, float, pd.Series]] = []
+    for _, books_row in books_df.iterrows():
+        candidate_id = str(books_row.get("books_record_id", "") or "").strip()
+        is_existing_candidate = bool(existing_candidate_id and candidate_id == existing_candidate_id)
+        if status == "missing_in_gstr" and not is_existing_candidate:
+            continue
+        ranked_candidates.append(
+            (is_existing_candidate, _gst_gemini_candidate_score(result_row, books_row), books_row)
+        )
+
+    ranked_candidates.sort(key=lambda item: (not item[0], -item[1]))
+    return [
+        _gst_gemini_candidate_record(books_row)
+        for _, _, books_row in ranked_candidates[:MAX_GEMINI_CANDIDATES]
+    ]
+
+
+def _gst_gemini_candidate_score(result_row: pd.Series, books_row: pd.Series) -> float:
+    """Rank candidates using only the limited fields allowed in the prompt."""
+    score = 0.0
+    result_gstin = _normalise_gstin_key(
+        _first_limited_context_value(result_row, ["gstr_gstin", "gstin", "zoho_gstin"])
+    )
+    result_invoice = _normalise_invoice_key(
+        _first_limited_context_value(
+            result_row,
+            ["gstr_invoice_number", "invoice_number", "zoho_invoice_number"],
+        )
+    )
+    result_date = _first_limited_context_value(
+        result_row,
+        ["gstr_invoice_date", "invoice_date", "zoho_invoice_date"],
+    )
+
+    if result_gstin and result_gstin == str(books_row.get("gstin_key", "") or ""):
+        score += 4.0
+    if result_invoice and result_invoice == str(books_row.get("invoice_key", "") or ""):
+        score += 5.0
+
+    date_difference = _date_difference_days(result_date, books_row.get("books_invoice_date"))
+    if date_difference is not None:
+        score += max(0.0, 2.0 - (date_difference / 7.0))
+
+    for result_columns, books_column in [
+        (["taxable_value_gstr", "gstr_taxable_value", "taxable_value_books"], "books_taxable_value"),
+        (["tax_amount_gstr", "tax_amount_books"], "books_tax_amount"),
+    ]:
+        result_value = _first_limited_context_value(result_row, result_columns)
+        if result_value != "" and not _is_missing_money_value(books_row.get(books_column)):
+            difference = abs(_amount(result_value) - _amount(books_row.get(books_column)))
+            score += 2.0 if difference <= AMOUNT_TOLERANCE else max(0.0, 1.0 - difference / 1000.0)
+    return score
+
+
+def _gst_gemini_candidate_record(books_row: pd.Series) -> dict[str, Any]:
+    """Map one books invoice to the limited candidate schema sent to Gemini."""
+    return {
+        "candidate_books_invoice_number": _limited_context_value(books_row.get("invoice_number")),
+        "candidate_books_gstin": _limited_context_value(books_row.get("gstin")),
+        "candidate_books_date": _limited_context_value(books_row.get("books_invoice_date")),
+        "candidate_books_taxable_value": _limited_context_value(books_row.get("books_taxable_value")),
+        "candidate_books_igst": _limited_context_value(books_row.get("books_igst_amount")),
+        "candidate_books_cgst": _limited_context_value(books_row.get("books_cgst_amount")),
+        "candidate_books_sgst": _limited_context_value(books_row.get("books_sgst_amount")),
+        "candidate_books_total_tax": _limited_context_value(books_row.get("books_tax_amount")),
+        "candidate_source": _limited_context_value(books_row.get("books_source_type")) or "books",
+        "candidate_id": _limited_context_value(books_row.get("books_record_id")),
+    }
+
+
+def _first_limited_context_value(row: pd.Series, column_names: list[str]) -> Any:
+    """Return the first present result value from a bounded list of columns."""
+    for column_name in column_names:
+        value = _limited_context_value(row.get(column_name))
+        if value != "":
+            return value
+    return ""
+
+
+def _limited_context_value(value: Any) -> Any:
+    """Convert pandas nulls safely and cap text sent to Gemini."""
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, str):
+        return value[:300]
+    return value
+
+
 def _apply_deterministic_gst_insights(results_df: pd.DataFrame) -> pd.DataFrame:
     """Fill blank AI columns with deterministic, row-specific review text."""
     enriched_df = results_df.copy()
@@ -1881,6 +2065,7 @@ def run_gst_reconciliation(
     amount_tolerance: float = AMOUNT_TOLERANCE,
     fallback_date_tolerance_days: int = FALLBACK_DATE_TOLERANCE_DAYS,
     stage_callback: Callable[[str], None] | None = None,
+    use_gemini_suggestions: bool = False,
 ) -> dict:
     """Run GST reconciliation and write finance-friendly Excel output."""
     upload_metadata = selected_upload_metadata
@@ -1932,6 +2117,18 @@ def run_gst_reconciliation(
     except Exception as error:
         print(f"[GST Reconciliation] Rule-based matching failed: {error}")
         raise RuntimeError(f"GST rule-based matching failed: {error}") from error
+
+    if use_gemini_suggestions:
+        try:
+            results = add_gst_gemini_suggestions(results, books_gst_df)
+        except Exception as error:
+            print(f"[GST Reconciliation] Gemini suggestions failed: {error}")
+            results = _ensure_gemini_columns(results)
+            review_mask = results["match_status"].fillna("").astype(str).isin(GEMINI_GST_REVIEW_STATUSES)
+            for column_name, fallback_value in FALLBACK_SUGGESTION.items():
+                results.loc[review_mask, column_name] = fallback_value
+    else:
+        results = _ensure_gemini_columns(results)
 
     if generate_ai_insights:
         _notify_stage(stage_callback, "Generating Vertex AI insights")
@@ -1999,6 +2196,7 @@ def run_gst_reconciliation(
         "tolerance_used": amount_tolerance,
         "fallback_date_tolerance_days": fallback_date_tolerance_days,
         "is_placeholder": False,
+        "gemini_suggestions_enabled": use_gemini_suggestions,
         "message": "GST reconciliation completed using selected-upload rule-based matching.",
         **ai_metadata,
     }

@@ -129,6 +129,19 @@ TECHNICAL_DEFAULT_HIDE_COLUMNS = [
     "run_id",
     "raw_json",
 ]
+GEMINI_RESULT_COLUMNS = [
+    "gemini_suggestion",
+    "gemini_confidence",
+    "gemini_reason",
+    "gemini_recommendation",
+    "gemini_candidate_id",
+]
+GEMINI_DISPLAY_LABELS = {
+    "gemini_suggestion": "Gemini Suggestion",
+    "gemini_confidence": "Confidence",
+    "gemini_reason": "Reason",
+    "gemini_recommendation": "Recommendation",
+}
 STATUS_LABELS = {
     "bank_not_in_books": "Bank Only",
     "books_not_in_bank": "Books Only",
@@ -180,6 +193,10 @@ BANK_REVIEW_COLUMNS = [
     "match_reason",
     "ai_summary",
     "ai_recommendation",
+    "gemini_suggestion",
+    "gemini_confidence",
+    "gemini_reason",
+    "gemini_recommendation",
 ]
 BANK_TECHNICAL_COLUMNS = BANK_REVIEW_COLUMNS + [
     "bank_line_id",
@@ -217,6 +234,10 @@ GST_REVIEW_COLUMNS = [
     "match_reason",
     "ai_summary",
     "ai_recommendation",
+    "gemini_suggestion",
+    "gemini_confidence",
+    "gemini_reason",
+    "gemini_recommendation",
 ]
 HIGH_PRIORITY_STATUSES = {
     "bank_not_in_books",
@@ -476,19 +497,26 @@ def _friendly_dataframe(dataframe: pd.DataFrame, preferred_columns: list[str]) -
     return display_df.loc[:, available_preferred + remaining].copy()
 
 
-def _bank_review_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
-    return _friendly_dataframe(_with_review_priority(dataframe), BANK_REVIEW_COLUMNS)
+def _bank_review_dataframe(dataframe: pd.DataFrame, show_gemini: bool = False) -> pd.DataFrame:
+    display_df = dataframe.drop(columns=GEMINI_RESULT_COLUMNS, errors="ignore") if not show_gemini else dataframe
+    display_df = _friendly_dataframe(_with_review_priority(display_df), BANK_REVIEW_COLUMNS)
+    display_df = display_df.drop(columns=["gemini_candidate_id"], errors="ignore")
+    return display_df.rename(columns=GEMINI_DISPLAY_LABELS)
 
 
-def _gst_review_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
-    return _friendly_dataframe(_with_review_priority(dataframe), GST_REVIEW_COLUMNS)
+def _gst_review_dataframe(dataframe: pd.DataFrame, show_gemini: bool = False) -> pd.DataFrame:
+    display_df = dataframe.drop(columns=GEMINI_RESULT_COLUMNS, errors="ignore") if not show_gemini else dataframe
+    display_df = _friendly_dataframe(_with_review_priority(display_df), GST_REVIEW_COLUMNS)
+    display_df = display_df.drop(columns=["gemini_candidate_id"], errors="ignore")
+    return display_df.rename(columns=GEMINI_DISPLAY_LABELS)
 
 
-def _bank_technical_dataframe(dataframe: pd.DataFrame) -> pd.DataFrame:
-    display_df = _with_review_priority(dataframe)
+def _bank_technical_dataframe(dataframe: pd.DataFrame, show_gemini: bool = False) -> pd.DataFrame:
+    display_df = dataframe.drop(columns=GEMINI_RESULT_COLUMNS, errors="ignore") if not show_gemini else dataframe
+    display_df = _with_review_priority(display_df).drop(columns=["gemini_candidate_id"], errors="ignore")
     available_columns = [column for column in BANK_TECHNICAL_COLUMNS if column in display_df.columns]
     remaining = [column for column in display_df.columns if column not in available_columns]
-    return display_df.loc[:, available_columns + remaining].copy()
+    return display_df.loc[:, available_columns + remaining].copy().rename(columns=GEMINI_DISPLAY_LABELS)
 
 
 def _filter_search(dataframe: pd.DataFrame, search_text: str, candidates: list[str]) -> pd.DataFrame:
@@ -750,12 +778,13 @@ def _show_gst_action_summary(dataframe: pd.DataFrame) -> None:
     )
 
 
-def _gst_technical_audit_dataframe(results_df):
+def _gst_technical_audit_dataframe(results_df, show_gemini: bool = False):
     """Return GST technical audit columns with raw traceability fields."""
-    display_df = _with_review_priority(results_df)
+    display_df = results_df.drop(columns=GEMINI_RESULT_COLUMNS, errors="ignore") if not show_gemini else results_df
+    display_df = _with_review_priority(display_df).drop(columns=["gemini_candidate_id"], errors="ignore")
     available_columns = [column for column in GST_TECHNICAL_COLUMNS if column in display_df.columns]
     remaining = [column for column in display_df.columns if column not in available_columns]
-    return display_df.loc[:, available_columns + remaining].copy()
+    return display_df.loc[:, available_columns + remaining].copy().rename(columns=GEMINI_DISPLAY_LABELS)
 
 
 def _split_ignored_opening_balances(results_df):
@@ -1021,6 +1050,14 @@ with bank_tab:
         key="generate_bank_ai_insights",
         help="Rule-based matching runs fastest. Enable Vertex AI only when you need exception explanations.",
     )
+    use_bank_gemini = st.checkbox(
+        "Use Gemini suggestions for unmatched Bank rows",
+        value=False,
+        key="use_bank_gemini_suggestions",
+    )
+    st.caption(
+        "Gemini suggestions are assistive only. Final matching remains rule-based and finance-reviewed."
+    )
     run_bank_clicked = st.button(
         "Run Bank Reconciliation",
         type="primary",
@@ -1043,6 +1080,7 @@ with bank_tab:
                     selected_upload_metadata=selected_bank_upload,
                     generate_ai_insights=generate_bank_ai,
                     max_ai_rows=10,
+                    use_gemini_suggestions=use_bank_gemini,
                 )
                 update_bank_stage("Preparing review summary...")
                 update_bank_stage("Bank reconciliation completed.")
@@ -1095,14 +1133,26 @@ with bank_tab:
             )
             export_path = Path(bank_result["export_path"])
             file_summary_card(export_path.name, "Bank Reconciliation")
-            _show_download_buttons(export_path, _bank_review_dataframe(bank_needs_review), "bank")
+            _show_download_buttons(
+                export_path,
+                _bank_review_dataframe(bank_needs_review, show_gemini=use_bank_gemini),
+                "bank",
+            )
         for tab, (label, statuses) in zip(bank_tabs[1:-1], BANK_DETAIL_TABS.items()):
             with tab:
                 source_df = bank_working_results if label == "Matched" else bank_needs_review
                 selected_bank_rows = _review_type_subset(source_df, label, {label: statuses})
-                st.dataframe(_bank_review_dataframe(selected_bank_rows), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    _bank_review_dataframe(selected_bank_rows, show_gemini=use_bank_gemini),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         with bank_technical_tab:
-            st.dataframe(_bank_technical_dataframe(bank_result["results"]), use_container_width=True, hide_index=True)
+            st.dataframe(
+                _bank_technical_dataframe(bank_result["results"], show_gemini=use_bank_gemini),
+                use_container_width=True,
+                hide_index=True,
+            )
     elif bank_error and selected_bank_upload is not None:
         section_card(
             "Bank Reconciliation Not Completed",
@@ -1134,6 +1184,14 @@ with gst_tab:
         key="generate_gst_ai_insights",
         help="Rule-based matching runs fastest. Enable Vertex AI for up to 10 unique exception explanations.",
     )
+    use_gst_gemini = st.checkbox(
+        "Use Gemini suggestions for unmatched GST rows",
+        value=False,
+        key="use_gst_gemini_suggestions",
+    )
+    st.caption(
+        "Gemini suggestions are assistive only. Final matching remains rule-based and finance-reviewed."
+    )
     run_gst_clicked = st.button(
         "Run GST Reconciliation",
         type="primary",
@@ -1155,6 +1213,7 @@ with gst_tab:
                     generate_ai_insights=generate_gst_ai,
                     max_ai_rows=10,
                     stage_callback=stage_callback,
+                    use_gemini_suggestions=use_gst_gemini,
                 )
                 progress_bar.progress(100)
                 status_placeholder.success("GST reconciliation completed.")
@@ -1210,14 +1269,26 @@ with gst_tab:
             )
             export_path = Path(gst_result["export_path"])
             file_summary_card(export_path.name, "GST Reconciliation")
-            _show_download_buttons(export_path, _gst_review_dataframe(gst_needs_review), "gst")
+            _show_download_buttons(
+                export_path,
+                _gst_review_dataframe(gst_needs_review, show_gemini=use_gst_gemini),
+                "gst",
+            )
         for tab, (label, statuses) in zip(gst_tabs[1:-1], GST_DETAIL_TABS.items()):
             with tab:
                 source_df = gst_working_results if label == "Matched" else gst_needs_review
                 selected_gst_rows = _review_type_subset(source_df, label, {label: statuses})
-                st.dataframe(_gst_review_dataframe(selected_gst_rows), use_container_width=True, hide_index=True)
+                st.dataframe(
+                    _gst_review_dataframe(selected_gst_rows, show_gemini=use_gst_gemini),
+                    use_container_width=True,
+                    hide_index=True,
+                )
         with technical_tab:
-            st.dataframe(_gst_technical_audit_dataframe(gst_result["results"]), use_container_width=True, hide_index=True)
+            st.dataframe(
+                _gst_technical_audit_dataframe(gst_result["results"], show_gemini=use_gst_gemini),
+                use_container_width=True,
+                hide_index=True,
+            )
     elif gst_error and selected_gst_upload is not None:
         section_card(
             "GST Reconciliation Not Completed",

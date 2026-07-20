@@ -18,6 +18,10 @@ from backend.reconciliation.upload_registry import (
     query_to_dataframe,
     table_name,
 )
+from backend.services.gemini_reconciliation_service import (
+    FALLBACK_SUGGESTION,
+    suggest_reconciliation_match,
+)
 
 
 BANK_LINES_VIEW = "finance_silver.fact_bank_statement_lines"
@@ -31,6 +35,15 @@ BANK_NOT_IN_BOOKS_REASON = "Bank statement transaction was not found in accounti
 BANK_NOT_IN_BOOKS_ACTION = "Check whether this bank transaction is recorded in Zoho/books or needs to be posted."
 BOOKS_NOT_IN_BANK_REASON = "Accounting-side transaction was not found in uploaded bank statement."
 BOOKS_NOT_IN_BANK_ACTION = "Check whether this transaction appears in another bank account, different date range, or is pending bank clearance."
+GEMINI_BANK_REVIEW_STATUSES = {
+    "bank_not_in_books",
+    "books_not_in_bank",
+    "review_match",
+    "possible_match",
+    "unmatched",
+}
+GEMINI_OUTPUT_COLUMNS = list(FALLBACK_SUGGESTION)
+MAX_GEMINI_CANDIDATES = 5
 
 
 def fetch_bank_reconciliation_data(
@@ -556,6 +569,116 @@ def _value_series(dataframe: pd.DataFrame, value: Any) -> pd.Series:
     return pd.Series(value, index=dataframe.index, dtype="object")
 
 
+def add_bank_gemini_suggestions(results: pd.DataFrame, accounting_df: pd.DataFrame) -> pd.DataFrame:
+    """Add advisory Gemini fields to Bank rows that need finance review.
+
+    The rule-generated ``match_status`` is never read from Gemini output and is
+    never modified here.
+    """
+    enriched_df = _ensure_gemini_columns(results)
+    prepared_accounting_df = _prepare_accounting_lines(accounting_df)
+
+    if "match_status" not in enriched_df.columns:
+        return enriched_df
+
+    review_mask = enriched_df["match_status"].fillna("").astype(str).isin(GEMINI_BANK_REVIEW_STATUSES)
+    for row_index in enriched_df.index[review_mask]:
+        row = enriched_df.loc[row_index]
+        suggestion = suggest_reconciliation_match(
+            _bank_gemini_row_context(row),
+            _bank_gemini_candidate_context(row, prepared_accounting_df),
+            recon_type="bank",
+        )
+        for column_name in GEMINI_OUTPUT_COLUMNS:
+            enriched_df.at[row_index, column_name] = suggestion.get(
+                column_name,
+                FALLBACK_SUGGESTION[column_name],
+            )
+
+    return enriched_df
+
+
+def _ensure_gemini_columns(results: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy with stable Gemini output columns."""
+    enriched_df = results.copy()
+    for column_name in GEMINI_OUTPUT_COLUMNS:
+        if column_name not in enriched_df.columns:
+            enriched_df[column_name] = ""
+    return enriched_df
+
+
+def _bank_gemini_row_context(row: pd.Series) -> dict[str, Any]:
+    """Expose only the permitted bank-side context to Gemini."""
+    return {
+        "bank_date": _limited_context_value(row.get("bank_date")),
+        "bank_amount": _limited_context_value(row.get("bank_amount")),
+        "bank_narration": _limited_context_value(row.get("bank_narration")),
+    }
+
+
+def _bank_gemini_candidate_context(
+    result_row: pd.Series,
+    accounting_df: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    """Return up to five relevant, limited books-side candidate records."""
+    if accounting_df.empty:
+        return []
+
+    existing_candidate_id = str(result_row.get("accounting_record_id", "") or "").strip()
+    ranked_candidates: list[tuple[bool, float, int, pd.Series]] = []
+    for _, accounting_row in accounting_df.iterrows():
+        candidate_id = str(accounting_row.get("accounting_record_id", "") or "").strip()
+        is_existing_candidate = bool(existing_candidate_id and candidate_id == existing_candidate_id)
+
+        if str(result_row.get("match_status", "")) == "books_not_in_bank" and not is_existing_candidate:
+            continue
+
+        score, _ = _candidate_score(result_row, accounting_row)
+        date_difference = _date_difference_days(
+            result_row.get("bank_date"),
+            accounting_row.get("accounting_date"),
+        )
+        ranked_candidates.append(
+            (is_existing_candidate, score, date_difference if date_difference is not None else 999_999, accounting_row)
+        )
+
+    ranked_candidates.sort(key=lambda item: (not item[0], -item[1], item[2]))
+    return [
+        _bank_gemini_candidate_record(accounting_row)
+        for _, _, _, accounting_row in ranked_candidates[:MAX_GEMINI_CANDIDATES]
+    ]
+
+
+def _bank_gemini_candidate_record(accounting_row: pd.Series) -> dict[str, Any]:
+    """Map one books row to the limited candidate schema sent to Gemini."""
+    description = " | ".join(
+        value
+        for value in [
+            _limited_context_value(accounting_row.get("accounting_party_name")),
+            _limited_context_value(accounting_row.get("reference_number")),
+            _limited_context_value(accounting_row.get("transaction_number")),
+        ]
+        if value not in {"", None}
+    )
+    return {
+        "candidate_date": _limited_context_value(accounting_row.get("accounting_date")),
+        "candidate_amount": _limited_context_value(accounting_row.get("accounting_amount")),
+        "candidate_description": description[:300],
+        "candidate_source": "books",
+        "candidate_type": _limited_context_value(accounting_row.get("transaction_type")),
+        "candidate_id": _limited_context_value(accounting_row.get("accounting_record_id")),
+    }
+
+
+def _limited_context_value(value: Any) -> Any:
+    """Convert pandas nulls safely and bound text included in Gemini prompts."""
+    if value is None or pd.isna(value):
+        return ""
+    if isinstance(value, str):
+        return value[:300]
+    return value
+
+
 def _summary(results: pd.DataFrame, uploaded_rows: int | None = None) -> dict:
     """Build Streamlit KPI counts from bank reconciliation results."""
     ignored_opening_balance = int((results["match_status"] == "ignored_opening_balance").sum())
@@ -627,6 +750,7 @@ def run_bank_reconciliation(
     accounting_df: pd.DataFrame | None = None,
     generate_ai_insights: bool = True,
     max_ai_rows: int = 10,
+    use_gemini_suggestions: bool = False,
 ) -> dict:
     """Run deterministic bank reconciliation and write an Excel export."""
     upload_metadata = selected_upload_metadata
@@ -644,6 +768,18 @@ def run_bank_reconciliation(
 
     uploaded_rows = len(bank_lines_df.index)
     results = reconcile_bank_data(bank_lines_df, accounting_df)
+    if use_gemini_suggestions:
+        try:
+            results = add_bank_gemini_suggestions(results, accounting_df)
+        except Exception as error:
+            print(f"[Bank Reconciliation] Gemini suggestions failed: {error}")
+            results = _ensure_gemini_columns(results)
+            review_mask = results["match_status"].fillna("").astype(str).isin(GEMINI_BANK_REVIEW_STATUSES)
+            for column_name, fallback_value in FALLBACK_SUGGESTION.items():
+                results.loc[review_mask, column_name] = fallback_value
+    else:
+        results = _ensure_gemini_columns(results)
+
     if generate_ai_insights:
         try:
             results, ai_metadata = add_bank_ai_insights(results, max_rows=max_ai_rows)
@@ -683,6 +819,7 @@ def run_bank_reconciliation(
         "selected_upload": upload_metadata,
         "reconciliation_timestamp": reconciliation_timestamp,
         "is_placeholder": False,
+        "gemini_suggestions_enabled": use_gemini_suggestions,
         "message": "Bank reconciliation completed using deterministic BigQuery-backed matching.",
         **ai_metadata,
     }
