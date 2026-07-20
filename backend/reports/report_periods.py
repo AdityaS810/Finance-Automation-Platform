@@ -10,6 +10,7 @@ from typing import Any
 PERIOD_TYPES = {"full_year", "month", "quarter", "half_year", "custom"}
 QUARTER_ORDER = ("Q1", "Q2", "Q3", "Q4")
 HALF_YEAR_ORDER = ("H1", "H2")
+CONSOLIDATED_PERIOD_TYPES = {"quarter", "half_year", "full_year"}
 
 
 def parse_financial_year_start(financial_year_start: int | str) -> int:
@@ -281,3 +282,24 @@ def get_selected_report_period(
         if period_type == "full_year"
         else "Total",
     }
+
+
+def get_consolidated_report_period(
+    financial_year_start: int,
+    period_type: str,
+    selected_quarter: str | None = None,
+    selected_half: str | None = None,
+) -> dict[str, Any]:
+    """Return a Quarter, 6 Months, or 1 Year reporting window.
+
+    Consolidated P&L uses both dates, while the consolidated balance sheet uses
+    the returned ``end_date`` as its as-of date.
+    """
+    if period_type not in CONSOLIDATED_PERIOD_TYPES:
+        raise ValueError("Consolidated reports support Quarter, 6 Months, or 1 Year only.")
+    return get_selected_report_period(
+        financial_year_start,
+        period_type,
+        selected_quarter=selected_quarter,
+        selected_half=selected_half,
+    )

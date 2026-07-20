@@ -7,7 +7,12 @@ import json
 import pandas as pd
 from openpyxl import load_workbook
 
-from backend.reports.mis_report_generator import generate_mis_report, get_mis_metrics
+from backend.reports.mis_report_generator import (
+    generate_consolidated_balance_sheet_report,
+    generate_consolidated_pl_report,
+    generate_mis_report,
+    get_mis_metrics,
+)
 
 
 def _monthly_pl_df() -> pd.DataFrame:
@@ -292,6 +297,67 @@ def test_get_mis_metrics_returns_expected_keys():
     assert "Profit" in result
     assert result["Financial Year"] == "FY 2025-26"
     assert result["Report Period"] == "FY 2025-26"
+
+
+def test_generate_consolidated_pl_creates_quarter_excel_file(workspace_tmp_path):
+    result = generate_consolidated_pl_report(
+        2025,
+        workspace_tmp_path,
+        period_type="quarter",
+        selected_quarter="Q1",
+        monthly_pl_df=_monthly_pl_df(),
+    )
+
+    assert result["status"] == "success"
+    assert result["report_path"].exists()
+    assert result["report_path"].name == "Consolidated_PL_FY2025_26_quarter_Q1.xlsx"
+    assert result["report_period"]["start_date"].isoformat() == "2025-04-01"
+    assert result["report_period"]["end_date"].isoformat() == "2025-06-30"
+    workbook = load_workbook(result["report_path"], data_only=False)
+    worksheet = workbook["Consolidated P&L"]
+    assert worksheet["B6"].value == 100000
+    assert worksheet["B9"].value == "=B6-B8"
+    assert worksheet["B17"].value == "=B12+B14-B16"
+
+
+def test_generate_consolidated_balance_sheet_creates_as_of_excel_file(workspace_tmp_path):
+    balance_sheet_df = pd.DataFrame(
+        [
+            {
+                "as_of_date": "2025-09-30",
+                "bank_cash": 250000,
+                "receivables": 125000,
+                "other_assets": 10000,
+                "payables": 80000,
+                "tax_liabilities": 15000,
+                "equity_retained_earnings": 290000,
+            },
+            {
+                "as_of_date": "2025-12-31",
+                "bank_cash": 999999,
+                "receivables": 999999,
+                "payables": 999999,
+            },
+        ]
+    )
+    result = generate_consolidated_balance_sheet_report(
+        2025,
+        workspace_tmp_path,
+        period_type="half_year",
+        selected_half="H1",
+        balance_sheet_df=balance_sheet_df,
+    )
+
+    assert result["status"] == "success"
+    assert result["report_path"].exists()
+    assert result["report_path"].name == "Consolidated_Balance_Sheet_FY2025_26_half_year_H1.xlsx"
+    assert result["as_of_date"].isoformat() == "2025-09-30"
+    workbook = load_workbook(result["report_path"], data_only=False)
+    worksheet = workbook["Consolidated Balance Sheet"]
+    assert worksheet["B7"].value == 250000
+    assert worksheet["B8"].value == 125000
+    assert worksheet["B10"].value == "=B6"
+    assert worksheet["B18"].value == "=B10-B17"
 
 
 def test_generate_mis_report_creates_full_year_excel_file(workspace_tmp_path):

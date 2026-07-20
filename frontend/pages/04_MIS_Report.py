@@ -7,7 +7,11 @@ from pathlib import Path
 
 import streamlit as st
 
-from backend.reports.mis_report_generator import generate_mis_report
+from backend.reports.mis_report_generator import (
+    generate_consolidated_balance_sheet_report,
+    generate_consolidated_pl_report,
+    generate_mis_report,
+)
 from backend.reports.report_periods import (
     get_financial_year_dates,
     get_fy_label,
@@ -82,20 +86,36 @@ load_css()
 
 page_header(
     "MIS Report",
-    "Generate dynamic MIS P&L reports for a full FY, month, quarter, half year, or custom date range. MIS reports are generated from the Consume layer.",
+    "Generate MIS, Consolidated P&L, and Consolidated Balance Sheet reports from available accounting data.",
 )
 
 generate_tab, mapping_tab = st.tabs(["Generate Report", "Mapping Configuration"])
 
 with generate_tab:
     financial_year_options = [2024, 2025, 2026]
-    period_type_options = {
+    report_type_options = [
+        "Existing MIS Report",
+        "Consolidated P&L",
+        "Consolidated Balance Sheet",
+    ]
+    selected_report_type = st.selectbox("Report Type", options=report_type_options, index=0)
+    existing_period_type_options = {
         "Full Year": "full_year",
         "Month": "month",
         "Quarter": "quarter",
         "Half Year": "half_year",
         "Custom Date Range": "custom",
     }
+    consolidated_period_type_options = {
+        "Quarter": "quarter",
+        "6 Months": "half_year",
+        "1 Year": "full_year",
+    }
+    period_type_options = (
+        existing_period_type_options
+        if selected_report_type == "Existing MIS Report"
+        else consolidated_period_type_options
+    )
     organization_options = {
         "All Organizations": "all",
         "India - Midoffice Data Solutions Private Limited": "india",
@@ -113,7 +133,13 @@ with generate_tab:
     with selector_columns[1]:
         selected_period_type_label = st.selectbox("Period Type", options=list(period_type_options), index=0)
     with selector_columns[2]:
-        selected_organization_label = st.selectbox("Organization", options=list(organization_options), index=0)
+        selected_organization_label = st.selectbox(
+            "Organization",
+            options=list(organization_options),
+            index=0,
+            disabled=selected_report_type != "Existing MIS Report",
+            help="Consolidated reports always combine available India and US organization data.",
+        )
 
     selected_period_type = period_type_options[selected_period_type_label]
     selected_month = None
@@ -157,43 +183,70 @@ with generate_tab:
                 )
 
     with selector_columns[3]:
-        generate_clicked = st.button("Generate MIS Report", type="primary", use_container_width=True)
+        generate_clicked = st.button(
+            f"Generate {selected_report_type}",
+            type="primary",
+            use_container_width=True,
+        )
 
     if generate_clicked:
         try:
             report_output_dir = Path(__file__).resolve().parents[2] / "outputs"
-            result = generate_mis_report(
-                selected_financial_year_start,
-                report_output_dir,
-                org_filter=organization_options[selected_organization_label],
-                period_type=selected_period_type,
-                selected_month=selected_month,
-                selected_quarter=selected_quarter,
-                selected_half=selected_half,
-                custom_start_date=custom_start_date,
-                custom_end_date=custom_end_date,
-            )
+            common_report_arguments = {
+                "financial_year": selected_financial_year_start,
+                "output_dir": report_output_dir,
+                "period_type": selected_period_type,
+                "selected_quarter": selected_quarter,
+                "selected_half": selected_half,
+            }
+            if selected_report_type == "Consolidated P&L":
+                result = generate_consolidated_pl_report(**common_report_arguments)
+            elif selected_report_type == "Consolidated Balance Sheet":
+                result = generate_consolidated_balance_sheet_report(**common_report_arguments)
+            else:
+                result = generate_mis_report(
+                    **common_report_arguments,
+                    org_filter=organization_options[selected_organization_label],
+                    selected_month=selected_month,
+                    custom_start_date=custom_start_date,
+                    custom_end_date=custom_end_date,
+                )
             st.session_state["mis_report_result"] = result
             st.session_state.pop("mis_report_error", None)
             st.success(result["message"])
         except Exception:
-            st.session_state["mis_report_error"] = "MIS report could not be generated. Please check report inputs and try again."
+            st.session_state["mis_report_error"] = "The selected report could not be generated. Please check report inputs and available accounting data."
             st.session_state.pop("mis_report_result", None)
 
     mis_result = st.session_state.get("mis_report_result")
     mis_error = st.session_state.get("mis_report_error")
 
     if mis_result:
-        metric_items = [
-            ("Revenue", mis_result["metrics"]["Revenue"], "Selected reporting window", "Success", "RV"),
-            ("Expenses", mis_result["metrics"]["Expenses"], "Selected reporting window", "Warning", "EX"),
-            ("Profit", mis_result["metrics"]["Profit"], "Revenue less expenses", "Success", "PF"),
-            ("Currency", mis_result["metrics"]["Reporting Currency"], "Consolidated reporting", "Info", "INR"),
-            ("Journal Adjustments", mis_result["metrics"]["Journal Adjustments"], "Currently derived from detail data", "Info", "JA"),
-            ("Invoices", mis_result["metrics"]["Invoices"], "Selected period source rows", "Info", "IN"),
-            ("Bills", mis_result["metrics"]["Bills"], "Selected period source rows", "Info", "BL"),
-            ("Contacts", mis_result["metrics"]["Contacts"], "Dashboard fallback count", "Info", "CT"),
-        ]
+        if mis_result.get("report_type") == "Consolidated P&L":
+            metric_items = [
+                ("Revenue", mis_result["metrics"]["Revenue"], "Selected reporting window", "Success", "RV"),
+                ("COGS", mis_result["metrics"]["COGS"], "Available consolidated classification", "Warning", "CG"),
+                ("Operating Profit / EBITDA", mis_result["metrics"]["Operating Profit / EBITDA"], "Before other income/expenses", "Success", "OP"),
+                ("Net Profit", mis_result["metrics"]["Net Profit"], "Consolidated INR result", "Success", "NP"),
+            ]
+        elif mis_result.get("report_type") == "Consolidated Balance Sheet":
+            metric_items = [
+                ("Assets", mis_result["metrics"]["Assets"], "Available balances", "Success", "AS"),
+                ("Liabilities", mis_result["metrics"]["Liabilities"], "Available balances", "Warning", "LI"),
+                ("Equity / Retained Earnings", mis_result["metrics"]["Equity / Retained Earnings"], "Available balances", "Info", "EQ"),
+                ("As Of Date", mis_result["metrics"]["As Of Date"], "Selected period end date", "Info", "DT"),
+            ]
+        else:
+            metric_items = [
+                ("Revenue", mis_result["metrics"]["Revenue"], "Selected reporting window", "Success", "RV"),
+                ("Expenses", mis_result["metrics"]["Expenses"], "Selected reporting window", "Warning", "EX"),
+                ("Profit", mis_result["metrics"]["Profit"], "Revenue less expenses", "Success", "PF"),
+                ("Currency", mis_result["metrics"]["Reporting Currency"], "Consolidated reporting", "Info", "INR"),
+                ("Journal Adjustments", mis_result["metrics"]["Journal Adjustments"], "Currently derived from detail data", "Info", "JA"),
+                ("Invoices", mis_result["metrics"]["Invoices"], "Selected period source rows", "Info", "IN"),
+                ("Bills", mis_result["metrics"]["Bills"], "Selected period source rows", "Info", "BL"),
+                ("Contacts", mis_result["metrics"]["Contacts"], "Dashboard fallback count", "Info", "CT"),
+            ]
 
         metric_columns = st.columns(4)
         for index, item in enumerate(metric_items):
@@ -205,17 +258,19 @@ with generate_tab:
         section_card(
             "Latest Report",
             body_html=(
-                "<p>The MIS workbook now uses the selected financial year and reporting period to build dynamic headers, month columns, and output filenames.</p>"
-                "<p>Consume layer is where Excel/Reconciliation reads final business-ready data.</p>"
+                "<p>The selected workbook uses the financial year and reporting period to build its accounting date basis and output filename.</p>"
+                "<p>Consolidated reports combine available India and US data in INR.</p>"
             ),
         )
         if mis_result and mis_result.get("report_path") and Path(mis_result["report_path"]).exists():
             report_path = mis_result["report_path"]
             file_path = Path(report_path)
             generated_time = datetime.fromtimestamp(file_path.stat().st_mtime).strftime("%d %b %Y, %I:%M %p")
-            file_summary_card(file_path.name, "MIS Report")
+            file_summary_card(file_path.name, mis_result.get("report_type", "Existing MIS Report"))
             st.caption(f"Report period: {mis_result['report_period']['header_title']}")
             st.caption(f"Generated time: {generated_time}")
+            if mis_result.get("data_message"):
+                st.info(mis_result["data_message"])
         elif mis_error:
             section_card(
                 "Generation Failed",
@@ -242,10 +297,14 @@ with generate_tab:
 
     if mis_result:
         section_card(
-            "Monthly MIS Preview",
-            body_html="<p>Preview the line-item values written into the MIS workbook from the Consume layer for the selected reporting period.</p>",
+            "Report Preview",
+            body_html="<p>Preview the available line-item values written into the selected workbook.</p>",
         )
-        st.dataframe(mis_result["monthly_preview"], use_container_width=True, hide_index=True)
+        preview_df = mis_result.get("report_preview", mis_result.get("monthly_preview"))
+        if preview_df is not None and not preview_df.empty:
+            st.dataframe(preview_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("No report detail was available for preview. The blank-safe workbook can still be downloaded.")
 
 with mapping_tab:
     st.subheader("MIS Mapping Configuration")

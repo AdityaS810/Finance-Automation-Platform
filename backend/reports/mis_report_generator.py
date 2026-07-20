@@ -12,10 +12,12 @@ from typing import Any
 import pandas as pd
 import yaml
 from dotenv import load_dotenv
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
+from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from backend.reports.report_periods import (
+    get_consolidated_report_period,
     get_fy_label,
     get_month_periods,
     get_selected_report_period,
@@ -27,6 +29,8 @@ DEFAULT_PROJECT_ID = "internal-project-work-497507"
 MIS_MONTHLY_PL_VIEW = "finance_gold.mis_monthly_pl"
 DASHBOARD_SUMMARY_VIEW = "finance_gold.dashboard_summary"
 BRONZE_RAW_VIEW = "finance_bronze.zoho_raw"
+INVOICES_VIEW = "finance_silver.fact_invoices"
+BILLS_VIEW = "finance_silver.fact_bills"
 FX_RATE_DEFAULT = 90.0
 
 MONTHLY_TEMPLATE_SHEET = "Monthly P&L"
@@ -1641,6 +1645,420 @@ def generate_mis_report(
         "monthly_preview": monthly_preview_df,
         "report_period": report_period,
         "dashboard_kpis": _prepare_dashboard_kpis(metrics),
+    }
+
+
+def _consolidated_rows(dataframe: pd.DataFrame) -> pd.DataFrame:
+    """Use the Consume-layer all-organizations rows when they are available."""
+    if dataframe.empty or "source_org_key" not in dataframe.columns:
+        return dataframe.copy()
+    all_rows = dataframe[dataframe["source_org_key"].fillna("").astype(str).str.lower() == "all"]
+    return all_rows.copy() if not all_rows.empty else dataframe.copy()
+
+
+def _consolidated_pl_values(monthly_pl_df: pd.DataFrame) -> tuple[dict[str, float], list[str]]:
+    """Build a conservative consolidated P&L without inventing classifications."""
+    working_df = _consolidated_rows(monthly_pl_df)
+    revenue = _safe_sum(working_df, "revenue_amount")
+    total_expenses = _safe_sum(working_df, "expense_amount")
+    cogs = _safe_sum(working_df, "cogs_amount")
+    other_income = _safe_sum(working_df, "other_income_amount")
+    other_expenses = _safe_sum(working_df, "other_expense_amount")
+
+    journal_adjustments = _numeric_column(working_df, "journal_adjustment_amount")
+    if "other_income_amount" not in working_df.columns:
+        other_income = float(journal_adjustments.clip(lower=0).sum())
+    if "other_expense_amount" not in working_df.columns:
+        other_expenses = abs(float(journal_adjustments.clip(upper=0).sum()))
+
+    if "operating_expense_amount" in working_df.columns:
+        operating_expenses = _safe_sum(working_df, "operating_expense_amount")
+    else:
+        operating_expenses = max(total_expenses - cogs - other_expenses, 0.0)
+
+    gross_profit = revenue - cogs
+    operating_profit = gross_profit - operating_expenses
+    net_profit = operating_profit + other_income - other_expenses
+    messages: list[str] = []
+    if working_df.empty:
+        messages.append("No consolidated P&L data was available for the selected period; the workbook contains a blank-safe report.")
+    if "cogs_amount" not in working_df.columns:
+        messages.append("COGS classification was unavailable, so available bill expenses are presented under Operating Expenses.")
+    if "other_income_amount" not in working_df.columns or "other_expense_amount" not in working_df.columns:
+        messages.append("Other income and expense use the sign of available journal adjustments where detailed classification is unavailable.")
+
+    return {
+        "Revenue": revenue,
+        "COGS": cogs,
+        "Gross Profit": gross_profit,
+        "Operating Expenses": operating_expenses,
+        "Operating Profit / EBITDA": operating_profit,
+        "Other Income": other_income,
+        "Other Expenses": other_expenses,
+        "Net Profit": net_profit,
+    }, messages
+
+
+def fetch_consolidated_balance_sheet_data(
+    project_id: str | None,
+    as_of_date: date,
+) -> pd.DataFrame:
+    """Fetch available India/US INR balances at the selected period end date."""
+    from google.cloud import bigquery
+
+    resolved_project_id = _get_project_id(project_id)
+    client = bigquery.Client(project=resolved_project_id)
+    as_of_sql = _date_to_sql(as_of_date)
+    query = f"""
+        SELECT
+            'Receivables' AS line_item,
+            SUM(COALESCE(balance_amount_inr, 0)) AS amount_inr,
+            COUNT(*) AS source_records
+        FROM {_table_name(resolved_project_id, INVOICES_VIEW)}
+        WHERE invoice_date <= DATE '{as_of_sql}'
+        UNION ALL
+        SELECT
+            'Payables' AS line_item,
+            SUM(COALESCE(balance_amount_inr, 0)) AS amount_inr,
+            COUNT(*) AS source_records
+        FROM {_table_name(resolved_project_id, BILLS_VIEW)}
+        WHERE bill_date <= DATE '{as_of_sql}'
+    """
+    return _query_to_dataframe(client, query)
+
+
+def _first_numeric_value(dataframe: pd.DataFrame, column_names: list[str]) -> float | None:
+    """Return a summed numeric field when the field exists, preserving missingness."""
+    for column_name in column_names:
+        if column_name in dataframe.columns:
+            numeric = pd.to_numeric(dataframe[column_name], errors="coerce")
+            if numeric.notna().any():
+                return float(numeric.fillna(0).sum())
+    return None
+
+
+def _balance_sheet_values(balance_sheet_df: pd.DataFrame) -> tuple[dict[str, float | None], list[str]]:
+    """Normalize long- or wide-form available balance-sheet inputs."""
+    values: dict[str, float | None] = {
+        "Bank / Cash": None,
+        "Receivables": None,
+        "Other Assets": None,
+        "Payables": None,
+        "Tax Liabilities": None,
+        "Equity / Retained Earnings": None,
+    }
+    aliases = {
+        "bankcash": "Bank / Cash",
+        "cash": "Bank / Cash",
+        "bank": "Bank / Cash",
+        "receivables": "Receivables",
+        "accountsreceivable": "Receivables",
+        "otherassets": "Other Assets",
+        "payables": "Payables",
+        "accountspayable": "Payables",
+        "taxliabilities": "Tax Liabilities",
+        "equity": "Equity / Retained Earnings",
+        "retainedearnings": "Equity / Retained Earnings",
+        "equityretainedearnings": "Equity / Retained Earnings",
+    }
+
+    if not balance_sheet_df.empty and "line_item" in balance_sheet_df.columns:
+        amount_column = "amount_inr" if "amount_inr" in balance_sheet_df.columns else "amount"
+        if amount_column in balance_sheet_df.columns:
+            for _, row in balance_sheet_df.iterrows():
+                key = re.sub(r"[^a-z]", "", str(row.get("line_item", "")).lower())
+                target = aliases.get(key)
+                amount = pd.to_numeric(pd.Series([row.get(amount_column)]), errors="coerce").iloc[0]
+                if target and not pd.isna(amount):
+                    values[target] = float(amount) + float(values[target] or 0)
+
+    wide_columns = {
+        "Bank / Cash": ["bank_cash", "cash_amount", "bank_balance_amount"],
+        "Receivables": ["receivables", "receivables_amount", "invoice_outstanding_amount"],
+        "Other Assets": ["other_assets", "other_assets_amount"],
+        "Payables": ["payables", "payables_amount", "bill_outstanding_amount"],
+        "Tax Liabilities": ["tax_liabilities", "tax_liability_amount"],
+        "Equity / Retained Earnings": ["equity_retained_earnings", "retained_earnings", "equity_amount"],
+    }
+    for label, column_names in wide_columns.items():
+        if values[label] is None:
+            values[label] = _first_numeric_value(balance_sheet_df, column_names)
+
+    missing_labels = [label for label, value in values.items() if value is None]
+    messages: list[str] = []
+    if balance_sheet_df.empty:
+        messages.append("No consolidated balance-sheet data was available as of the selected date; the workbook contains a blank-safe report.")
+    if missing_labels:
+        messages.append("Unavailable categories are shown as blank: " + ", ".join(missing_labels) + ".")
+    messages.append("Receivable and payable balances reflect the latest available records dated on or before the as-of date.")
+    return values, messages
+
+
+def _filter_balance_sheet_as_of(balance_sheet_df: pd.DataFrame, as_of_date: date) -> pd.DataFrame:
+    """Use the latest supplied balance snapshot on or before the period end."""
+    if balance_sheet_df.empty:
+        return balance_sheet_df.copy()
+    for column_name in ["as_of_date", "balance_date", "report_date"]:
+        if column_name not in balance_sheet_df.columns:
+            continue
+        parsed_dates = pd.to_datetime(balance_sheet_df[column_name], errors="coerce").dt.date
+        eligible_df = balance_sheet_df[parsed_dates <= as_of_date].copy()
+        if eligible_df.empty:
+            return eligible_df
+        eligible_dates = pd.to_datetime(eligible_df[column_name], errors="coerce").dt.date
+        return eligible_df[eligible_dates == eligible_dates.max()].copy()
+    return balance_sheet_df.copy()
+
+
+def _style_consolidated_statement(worksheet, title: str, subtitle: str) -> None:
+    """Apply a compact management-report style to a consolidated statement."""
+    dark_blue = "1F2D4E"
+    mid_blue = "4472C4"
+    light_blue = "D6E4F7"
+    thin_gray = Side(style="thin", color="D0D7E2")
+    worksheet.sheet_view.showGridLines = False
+    worksheet.merge_cells("A1:B1")
+    worksheet["A1"] = title
+    worksheet["A1"].fill = PatternFill("solid", fgColor=dark_blue)
+    worksheet["A1"].font = Font(color="FFFFFF", bold=True, size=12)
+    worksheet["A1"].alignment = Alignment(horizontal="left")
+    worksheet.merge_cells("A2:B2")
+    worksheet["A2"] = subtitle
+    worksheet["A2"].fill = PatternFill("solid", fgColor=mid_blue)
+    worksheet["A2"].font = Font(color="FFFFFF", italic=True, size=9)
+    worksheet["A4"] = "Line Item"
+    worksheet["B4"] = "Amount (INR)"
+    for cell in worksheet[4]:
+        cell.fill = PatternFill("solid", fgColor=dark_blue)
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    worksheet.column_dimensions["A"].width = 36
+    worksheet.column_dimensions["B"].width = 24
+    worksheet.freeze_panes = "A5"
+    for row in worksheet.iter_rows(min_row=4, max_row=worksheet.max_row, min_col=1, max_col=2):
+        for cell in row:
+            cell.border = Border(bottom=thin_gray)
+    for cell in worksheet["B"]:
+        if cell.row >= 5:
+            cell.number_format = '₹#,##0;[Red](₹#,##0);-'
+            cell.alignment = Alignment(horizontal="right")
+    for row_number in range(5, worksheet.max_row + 1):
+        label = str(worksheet.cell(row_number, 1).value or "")
+        if label in {"Revenue", "COGS", "Operating Expenses", "Other Income", "Other Expenses", "Assets", "Liabilities", "Equity"}:
+            for column_number in (1, 2):
+                cell = worksheet.cell(row_number, column_number)
+                cell.fill = PatternFill("solid", fgColor=mid_blue)
+                cell.font = Font(color="FFFFFF", bold=True)
+        elif label.startswith("Total ") or label in {"Gross Profit", "Operating Profit / EBITDA", "Net Profit", "Current Assets"}:
+            for column_number in (1, 2):
+                cell = worksheet.cell(row_number, column_number)
+                cell.fill = PatternFill("solid", fgColor=light_blue)
+                cell.font = Font(bold=True)
+
+
+def _add_availability_sheet(workbook: Workbook, messages: list[str], period_text: str) -> None:
+    """Add explicit source limitations instead of silently filling missing data."""
+    worksheet = workbook.create_sheet("Data Availability")
+    worksheet.append(["Reporting Basis", period_text])
+    worksheet.append(["Reporting Currency", "INR"])
+    worksheet.append([])
+    worksheet.append(["Data Availability Notes"])
+    for message in messages:
+        worksheet.append([message])
+    worksheet.column_dimensions["A"].width = 105
+    worksheet.column_dimensions["B"].width = 28
+    worksheet["A1"].font = Font(bold=True)
+    worksheet["A2"].font = Font(bold=True)
+    worksheet["A4"].font = Font(bold=True, color="FFFFFF")
+    worksheet["A4"].fill = PatternFill("solid", fgColor="1F2D4E")
+    for row_number in range(5, worksheet.max_row + 1):
+        worksheet.cell(row_number, 1).alignment = Alignment(wrap_text=True, vertical="top")
+
+
+def _write_consolidated_pl_workbook(
+    destination_path: Path,
+    report_period: dict[str, Any],
+    values: dict[str, float],
+    messages: list[str],
+) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Consolidated P&L"
+    rows = [
+        ("Revenue", None),
+        ("Revenue - Available Data", values["Revenue"]),
+        ("COGS", None),
+        ("COGS - Available Data", values["COGS"]),
+        ("Gross Profit", "=B6-B8"),
+        ("Operating Expenses", None),
+        ("Operating Expenses - Available Data", values["Operating Expenses"]),
+        ("Operating Profit / EBITDA", "=B9-B11"),
+        ("Other Income", None),
+        ("Other Income - Available Data", values["Other Income"]),
+        ("Other Expenses", None),
+        ("Other Expenses - Available Data", values["Other Expenses"]),
+        ("Net Profit", "=B12+B14-B16"),
+    ]
+    for row_number, (label, value) in enumerate(rows, start=5):
+        worksheet.cell(row_number, 1, label)
+        worksheet.cell(row_number, 2, value)
+    _style_consolidated_statement(
+        worksheet,
+        "MIDOFFICE DATA | Consolidated Profit & Loss Statement",
+        f"{report_period['header_title']} | India + US | Reporting Currency: INR",
+    )
+    _add_availability_sheet(workbook, messages, f"{report_period['start_date']} to {report_period['end_date']}")
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.fullCalcOnLoad = True
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(destination_path)
+
+
+def _write_consolidated_balance_sheet_workbook(
+    destination_path: Path,
+    report_period: dict[str, Any],
+    values: dict[str, float | None],
+    messages: list[str],
+) -> None:
+    workbook = Workbook()
+    worksheet = workbook.active
+    worksheet.title = "Consolidated Balance Sheet"
+    rows = [
+        ("Assets", None),
+        ("Current Assets", "=SUM(B7:B9)"),
+        ("Bank / Cash", values["Bank / Cash"]),
+        ("Receivables", values["Receivables"]),
+        ("Other Assets", values["Other Assets"]),
+        ("Total Assets", "=B6"),
+        ("Liabilities", None),
+        ("Payables", values["Payables"]),
+        ("Tax Liabilities", values["Tax Liabilities"]),
+        ("Total Liabilities", "=SUM(B12:B13)"),
+        ("Equity", None),
+        ("Equity / Retained Earnings", values["Equity / Retained Earnings"]),
+        ("Total Liabilities and Equity", "=B14+B16"),
+        ("Balance Check", "=B10-B17"),
+    ]
+    for row_number, (label, value) in enumerate(rows, start=5):
+        worksheet.cell(row_number, 1, label)
+        worksheet.cell(row_number, 2, value)
+    _style_consolidated_statement(
+        worksheet,
+        "MIDOFFICE DATA | Consolidated Balance Sheet",
+        f"As of {report_period['end_date'].strftime('%d %b %Y')} | India + US | Reporting Currency: INR",
+    )
+    _add_availability_sheet(workbook, messages, f"As of {report_period['end_date']}")
+    workbook.calculation.forceFullCalc = True
+    workbook.calculation.fullCalcOnLoad = True
+    destination_path.parent.mkdir(parents=True, exist_ok=True)
+    workbook.save(destination_path)
+
+
+def generate_consolidated_pl_report(
+    financial_year: int | str,
+    output_dir: str | Path,
+    project_id: str | None = None,
+    period_type: str = "full_year",
+    selected_quarter: str | None = None,
+    selected_half: str | None = None,
+    monthly_pl_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    """Generate an INR consolidated P&L for India and US organizations."""
+    financial_year_start = parse_financial_year_start(financial_year)
+    report_period = get_consolidated_report_period(
+        financial_year_start,
+        period_type,
+        selected_quarter=selected_quarter,
+        selected_half=selected_half,
+    )
+    if monthly_pl_df is None:
+        try:
+            monthly_pl_df, _ = fetch_gold_mis_data(project_id, org_filter="all", report_period=report_period)
+        except Exception:
+            monthly_pl_df = pd.DataFrame()
+    monthly_pl_df = _filter_dataframe_by_date_range(
+        monthly_pl_df if monthly_pl_df is not None else pd.DataFrame(),
+        "report_month",
+        report_period["start_date"],
+        report_period["end_date"],
+    )
+    values, messages = _consolidated_pl_values(monthly_pl_df)
+    report_path = Path(output_dir) / (
+        f"Consolidated_PL_{_financial_year_token(financial_year_start)}_{report_period['file_suffix']}.xlsx"
+    )
+    _write_consolidated_pl_workbook(report_path, report_period, values, messages)
+    preview = pd.DataFrame([{"Line Item": label, "Amount (INR)": amount} for label, amount in values.items()])
+    return {
+        "status": "success",
+        "message": f"Consolidated P&L generated for {report_period['period_name']}.",
+        "report_type": "Consolidated P&L",
+        "report_path": report_path,
+        "report_period": report_period,
+        "metrics": {
+            "Revenue": _format_currency(values["Revenue"]),
+            "COGS": _format_currency(values["COGS"]),
+            "Operating Profit / EBITDA": _format_currency(values["Operating Profit / EBITDA"]),
+            "Net Profit": _format_currency(values["Net Profit"]),
+            "Reporting Currency": "INR",
+        },
+        "report_preview": preview,
+        "data_message": " ".join(messages),
+        "is_placeholder": False,
+    }
+
+
+def generate_consolidated_balance_sheet_report(
+    financial_year: int | str,
+    output_dir: str | Path,
+    project_id: str | None = None,
+    period_type: str = "full_year",
+    selected_quarter: str | None = None,
+    selected_half: str | None = None,
+    balance_sheet_df: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    """Generate an INR consolidated balance sheet at the selected period end."""
+    financial_year_start = parse_financial_year_start(financial_year)
+    report_period = get_consolidated_report_period(
+        financial_year_start,
+        period_type,
+        selected_quarter=selected_quarter,
+        selected_half=selected_half,
+    )
+    if balance_sheet_df is None:
+        try:
+            balance_sheet_df = fetch_consolidated_balance_sheet_data(project_id, report_period["end_date"])
+        except Exception:
+            balance_sheet_df = pd.DataFrame()
+    balance_sheet_df = _filter_balance_sheet_as_of(
+        balance_sheet_df if balance_sheet_df is not None else pd.DataFrame(),
+        report_period["end_date"],
+    )
+    values, messages = _balance_sheet_values(balance_sheet_df)
+    report_path = Path(output_dir) / (
+        f"Consolidated_Balance_Sheet_{_financial_year_token(financial_year_start)}_{report_period['file_suffix']}.xlsx"
+    )
+    _write_consolidated_balance_sheet_workbook(report_path, report_period, values, messages)
+    assets = sum(float(values[label] or 0) for label in ["Bank / Cash", "Receivables", "Other Assets"])
+    liabilities = sum(float(values[label] or 0) for label in ["Payables", "Tax Liabilities"])
+    equity = float(values["Equity / Retained Earnings"] or 0)
+    preview = pd.DataFrame([{"Line Item": label, "Amount (INR)": amount} for label, amount in values.items()])
+    return {
+        "status": "success",
+        "message": f"Consolidated Balance Sheet generated as of {report_period['end_date']}.",
+        "report_type": "Consolidated Balance Sheet",
+        "report_path": report_path,
+        "report_period": report_period,
+        "as_of_date": report_period["end_date"],
+        "metrics": {
+            "Assets": _format_currency(assets),
+            "Liabilities": _format_currency(liabilities),
+            "Equity / Retained Earnings": _format_currency(equity),
+            "As Of Date": str(report_period["end_date"]),
+            "Reporting Currency": "INR",
+        },
+        "report_preview": preview,
+        "data_message": " ".join(messages),
+        "is_placeholder": False,
     }
 
 
