@@ -6,7 +6,14 @@ import streamlit as st
 
 from backend.services.upload_service import save_bank_statement_upload, save_gstr_upload
 from src.ingestion.bank_csv_parser import parse_bank_csv, parse_bank_excel
-from src.ingestion.bank_pdf_parser import parse_bank_pdf
+from src.ingestion.bank_pdf_parser import (
+    TEMPLATE_COLUMNS,
+    active_bank_pdf_templates,
+    load_bank_pdf_templates_dataframe,
+    parse_bank_pdf,
+    save_bank_pdf_templates_dataframe,
+    validate_bank_pdf_templates_dataframe,
+)
 from src.ingestion.gstr_excel_parser import parse_gstr_excel
 from src.ingestion.gstr_json_parser import parse_gstr_json
 from src.ui import file_summary_card, load_css, page_header, section_card, status_badge
@@ -17,7 +24,7 @@ load_css()
 
 page_header(
     "Uploads",
-    "Upload and process bank statements and GSTR reports.",
+    "Upload and process bank statements and GSTR reports into Raw source capture and Enrich standardized inputs.",
 )
 
 bank_required_columns = ["date", "narration", "debit", "credit", "balance_amount"]
@@ -39,187 +46,250 @@ def remove_duplicate_columns(df):
 
 
 def prepare_bank_df_for_save(bank_df):
-    """
-    The frontend/parser uses balance_amount.
-    The backend save function currently expects balance.
-    This function adds balance for backend compatibility.
-    """
+    """Add the backend-compatible balance column when parser output has balance_amount."""
     bank_df_to_save = bank_df.copy()
-
     if "balance" not in bank_df_to_save.columns and "balance_amount" in bank_df_to_save.columns:
         bank_df_to_save["balance"] = bank_df_to_save["balance_amount"]
-
     return bank_df_to_save
 
 
-bank_tab, gstr_tab = st.tabs(["Bank Statement", "GSTR Report"])
+def _template_label(template: dict) -> str:
+    return f"{template.get('template_name', 'Template')} | {template.get('bank_name', 'Bank')}"
 
-with bank_tab:
-    section_card(
-        "Upload Bank Statement",
-        body_html="<p>Accepted formats: CSV, Excel, PDF</p>",
-    )
 
-    uploaded_bank_file = st.file_uploader(
-        "Upload and Process",
-        type=["csv", "xlsx", "xls", "pdf"],
-        key="bank_statement_upload",
-        label_visibility="collapsed",
-    )
+upload_tab, templates_tab = st.tabs(["Upload Files", "Bank PDF Templates"])
 
-    if uploaded_bank_file is not None:
-        try:
-            if uploaded_bank_file.name.lower().endswith(".csv"):
-                bank_df = parse_bank_csv(uploaded_bank_file)
-                bank_df = remove_duplicate_columns(bank_df)
-                validation_result = validate_required_columns(bank_df, bank_required_columns)
+with upload_tab:
+    bank_tab, gstr_tab = st.tabs(["Bank Statement", "GSTR Report"])
 
-            elif uploaded_bank_file.name.lower().endswith((".xlsx", ".xls")):
-                bank_df = parse_bank_excel(uploaded_bank_file)
-                bank_df = remove_duplicate_columns(bank_df)
-                validation_result = validate_required_columns(bank_df, bank_required_columns)
+    with bank_tab:
+        section_card(
+            "Upload Bank Statement",
+            body_html="<p>Accepted formats: CSV, Excel, PDF</p>",
+        )
 
-            elif uploaded_bank_file.name.lower().endswith(".pdf"):
-                bank_df = parse_bank_pdf(uploaded_bank_file)
-                bank_df = remove_duplicate_columns(bank_df)
-                validation_result = validate_required_columns(bank_df, bank_required_columns)
-                parser_summary = bank_df.attrs.get("parser_debug_summary", {})
-                if parser_summary:
-                    st.info(
-                        "PDF parser summary: "
-                        f"{parser_summary.get('pages_processed', 0)} pages processed, "
-                        f"{parser_summary.get('rows_extracted', len(bank_df.index))} rows extracted, "
-                        f"first date {parser_summary.get('first_date')}, "
-                        f"last date {parser_summary.get('last_date')}."
-                    )
+        active_templates = active_bank_pdf_templates()
+        selected_template = None
+        if active_templates:
+            default_index = next(
+                (
+                    index
+                    for index, template in enumerate(active_templates)
+                    if str(template.get("bank_name", "")).strip().lower() == "hsbc"
+                ),
+                0,
+            )
+            selected_template = st.selectbox(
+                "Bank PDF Template",
+                options=active_templates,
+                index=default_index,
+                format_func=_template_label,
+                help="Used only for PDF uploads. CSV and Excel parsing use their standard column matching.",
+            )
+
+        uploaded_bank_file = st.file_uploader(
+            "Upload and Process",
+            type=["csv", "xlsx", "xls", "pdf"],
+            key="bank_statement_upload",
+            label_visibility="collapsed",
+        )
+
+        if uploaded_bank_file is not None:
+            try:
+                if uploaded_bank_file.name.lower().endswith(".csv"):
+                    bank_df = parse_bank_csv(uploaded_bank_file)
+                    bank_df = remove_duplicate_columns(bank_df)
+                    validation_result = validate_required_columns(bank_df, bank_required_columns)
+
+                elif uploaded_bank_file.name.lower().endswith((".xlsx", ".xls")):
+                    bank_df = parse_bank_excel(uploaded_bank_file)
+                    bank_df = remove_duplicate_columns(bank_df)
+                    validation_result = validate_required_columns(bank_df, bank_required_columns)
+
+                elif uploaded_bank_file.name.lower().endswith(".pdf"):
+                    bank_df = parse_bank_pdf(uploaded_bank_file, template_config=selected_template)
+                    bank_df = remove_duplicate_columns(bank_df)
+                    validation_result = validate_required_columns(bank_df, bank_required_columns)
+                    parser_summary = bank_df.attrs.get("parser_debug_summary", {})
+                    parser_template = bank_df.attrs.get("parser_template") or selected_template.get("template_name", "Selected template")
+                    if parser_summary:
+                        st.info(
+                            f"PDF template: {parser_template}. "
+                            f"{parser_summary.get('pages_processed', 0)} pages processed, "
+                            f"{parser_summary.get('rows_extracted', len(bank_df.index))} rows extracted, "
+                            f"first date {parser_summary.get('first_date')}, "
+                            f"last date {parser_summary.get('last_date')}."
+                        )
+                    else:
+                        st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
+                    print(f"[Uploads UI] PDF parser extracted row count: {len(bank_df.index)}")
+                    print(f"[Uploads UI] First 5 parsed bank rows: {bank_df.head(5).to_dict(orient='records')}")
+                    if bank_df.attrs.get("parser_warning"):
+                        st.warning(bank_df.attrs["parser_warning"])
+
                 else:
-                    st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
-                print(f"[Uploads UI] PDF parser extracted row count: {len(bank_df.index)}")
-                print(f"[Uploads UI] First 5 parsed bank rows: {bank_df.head(5).to_dict(orient='records')}")
-                if bank_df.attrs.get("parser_warning"):
-                    st.warning(bank_df.attrs["parser_warning"])
-
-            else:
+                    bank_df = None
+                    validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
+                    st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+            except ValueError as error:
                 bank_df = None
                 validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
-                st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
-        except ValueError as error:
-            bank_df = None
-            validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
-            st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
-            st.error(str(error))
-        except Exception as error:
-            bank_df = None
-            validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
-            st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
-            st.error(f"Bank statement could not be parsed: {error}")
+                st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
+                st.error(str(error))
+            except Exception:
+                bank_df = None
+                validation_result = {"is_valid": False, "missing_columns": bank_required_columns}
+                st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
+                st.error("Bank statement could not be parsed. Please check the file and selected template.")
 
-        if bank_df is not None:
-            file_summary_card(uploaded_bank_file.name, "Bank Statement", row_count=len(bank_df.index))
-            render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
+            if bank_df is not None:
+                file_summary_card(uploaded_bank_file.name, "Bank Statement", row_count=len(bank_df.index))
+                render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
 
+                section_card(
+                    "Parsed Preview",
+                    body_html="<p>Preview the standardized statement structure before saving.</p>",
+                )
+                st.dataframe(bank_df.head(20), use_container_width=True, hide_index=True)
+                if uploaded_bank_file.name.lower().endswith(".pdf"):
+                    st.caption(f"Parser extracted row count: {len(bank_df.index)}")
+
+                if st.button("Save Bank Data", key="save_bank_data", use_container_width=True):
+                    if not validation_result["is_valid"]:
+                        st.error("Bank file cannot be saved yet because required columns are missing.")
+                    else:
+                        try:
+                            bank_df_to_save = prepare_bank_df_for_save(bank_df)
+                            result = save_bank_statement_upload(bank_df_to_save, uploaded_bank_file.name)
+                            st.session_state["bank_upload_result"] = result
+                            st.success(result["message"])
+                            st.info(f"Rows saved count: {result['records_parsed']}")
+                            print(f"[Uploads UI] Bank rows saved count: {result['records_parsed']}")
+                        except Exception:
+                            st.error("Bank upload failed. Please check cloud authentication and try again.")
+
+                bank_upload_result = st.session_state.get("bank_upload_result")
+                if bank_upload_result:
+                    st.caption(
+                        f"Latest bank upload ID: {bank_upload_result['upload_id']} | Rows saved: {bank_upload_result['records_parsed']}"
+                    )
+
+        else:
             section_card(
-                "Parsed Preview",
-                body_html="<p>Preview the standardized statement structure before saving.</p>",
+                "Bank Statement Status",
+                body_html="<p>Upload a file to review the parsed structure and validation result.</p>",
             )
 
-            st.dataframe(bank_df.head(20), use_container_width=True, hide_index=True)
-            if uploaded_bank_file.name.lower().endswith(".pdf"):
-                st.caption(f"Parser extracted row count: {len(bank_df.index)}")
-
-            if st.button("Save Bank Data", key="save_bank_data", use_container_width=True):
-                if not validation_result["is_valid"]:
-                    st.error("Bank file cannot be saved yet because required columns are missing.")
-                else:
-                    try:
-                        bank_df_to_save = prepare_bank_df_for_save(bank_df)
-                        result = save_bank_statement_upload(bank_df_to_save, uploaded_bank_file.name)
-                        st.session_state["bank_upload_result"] = result
-                        st.success(result["message"])
-                        st.info(f"Rows saved count: {result['records_parsed']}")
-                        print(f"[Uploads UI] Bank rows saved count: {result['records_parsed']}")
-                    except Exception as error:
-                        st.error(f"Bank upload failed: {error}")
-
-            bank_upload_result = st.session_state.get("bank_upload_result")
-            if bank_upload_result:
-                st.caption(
-                    f"Latest bank upload ID: {bank_upload_result['upload_id']} | Rows saved: {bank_upload_result['records_parsed']}"
-                )
-
-    else:
+    with gstr_tab:
         section_card(
-            "Bank Statement Status",
-            body_html="<p>Upload a file to review the parsed structure and validation result.</p>",
+            "Upload GSTR Report",
+            body_html="<p>Accepted formats: Excel, JSON</p>",
         )
 
-with gstr_tab:
-    section_card(
-        "Upload GSTR Report",
-        body_html="<p>Accepted formats: Excel, JSON</p>",
-    )
+        uploaded_gstr_file = st.file_uploader(
+            "Upload and Process",
+            type=["xlsx", "xls", "json"],
+            key="gstr_report_upload",
+            label_visibility="collapsed",
+        )
 
-    uploaded_gstr_file = st.file_uploader(
-        "Upload and Process",
-        type=["xlsx", "xls", "json"],
-        key="gstr_report_upload",
-        label_visibility="collapsed",
-    )
-
-    if uploaded_gstr_file is not None:
-        try:
-            if uploaded_gstr_file.name.lower().endswith(".json"):
-                gstr_df = parse_gstr_json(uploaded_gstr_file)
-                gstr_df = remove_duplicate_columns(gstr_df)
-
-            elif uploaded_gstr_file.name.lower().endswith((".xlsx", ".xls")):
-                gstr_df = parse_gstr_excel(uploaded_gstr_file)
-                gstr_df = remove_duplicate_columns(gstr_df)
-
-            else:
+        if uploaded_gstr_file is not None:
+            try:
+                if uploaded_gstr_file.name.lower().endswith(".json"):
+                    gstr_df = parse_gstr_json(uploaded_gstr_file)
+                    gstr_df = remove_duplicate_columns(gstr_df)
+                elif uploaded_gstr_file.name.lower().endswith((".xlsx", ".xls")):
+                    gstr_df = parse_gstr_excel(uploaded_gstr_file)
+                    gstr_df = remove_duplicate_columns(gstr_df)
+                else:
+                    gstr_df = None
+                    st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
+            except ValueError as error:
                 gstr_df = None
-                st.markdown(status_badge("Unsupported File"), unsafe_allow_html=True)
-        except ValueError as error:
-            gstr_df = None
-            st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
-            st.error(str(error))
-        except Exception as error:
-            gstr_df = None
-            st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
-            st.error(f"GSTR file could not be parsed: {error}")
+                st.markdown(status_badge("Missing Columns"), unsafe_allow_html=True)
+                st.error(str(error))
+            except Exception:
+                gstr_df = None
+                st.markdown(status_badge("Upload Error"), unsafe_allow_html=True)
+                st.error("GSTR file could not be parsed. Please check the file and try again.")
 
-        if gstr_df is not None:
-            validation_result = validate_required_columns(gstr_df, gstr_required_columns)
+            if gstr_df is not None:
+                validation_result = validate_required_columns(gstr_df, gstr_required_columns)
+                file_summary_card(uploaded_gstr_file.name, "GSTR Report", row_count=len(gstr_df.index))
+                render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
 
-            file_summary_card(uploaded_gstr_file.name, "GSTR Report", row_count=len(gstr_df.index))
-            render_validation_state(validation_result["is_valid"], validation_result["missing_columns"])
+                section_card(
+                    "Parsed Preview",
+                    body_html="<p>Preview the standardized GSTR structure before saving.</p>",
+                )
+                st.dataframe(gstr_df.head(20), use_container_width=True, hide_index=True)
 
+                if st.button("Save GSTR Data", key="save_gstr_data", use_container_width=True):
+                    if not validation_result["is_valid"]:
+                        st.error("GSTR file cannot be saved yet because required columns are missing.")
+                    else:
+                        try:
+                            result = save_gstr_upload(gstr_df, uploaded_gstr_file.name)
+                            st.session_state["gstr_upload_result"] = result
+                            st.success(result["message"])
+                        except Exception:
+                            st.error("GSTR upload failed. Please check cloud authentication and try again.")
+
+                gstr_upload_result = st.session_state.get("gstr_upload_result")
+                if gstr_upload_result:
+                    st.caption(
+                        f"Latest GSTR upload ID: {gstr_upload_result['upload_id']} | Rows saved: {gstr_upload_result['records_parsed']}"
+                    )
+
+        else:
             section_card(
-                "Parsed Preview",
-                body_html="<p>Preview the standardized GSTR structure before saving.</p>",
+                "GSTR Report Status",
+                body_html="<p>Upload a file to review the parsed structure and validation result.</p>",
             )
 
-            st.dataframe(gstr_df.head(20), use_container_width=True, hide_index=True)
+with templates_tab:
+    section_card(
+        "Bank PDF Templates",
+        body_html=(
+            "<p>Bank PDF templates control how statement dates, amounts, debit, credit, and balance columns are parsed. "
+            "This helps onboard new bank formats without changing Python code.</p>"
+            "<p>Templates are stored in config/bank_pdf_templates.yaml and can be migrated to BigQuery later.</p>"
+        ),
+    )
 
-            if st.button("Save GSTR Data", key="save_gstr_data", use_container_width=True):
-                if not validation_result["is_valid"]:
-                    st.error("GSTR file cannot be saved yet because required columns are missing.")
-                else:
-                    try:
-                        result = save_gstr_upload(gstr_df, uploaded_gstr_file.name)
-                        st.session_state["gstr_upload_result"] = result
-                        st.success(result["message"])
-                    except Exception as error:
-                        st.error(f"GSTR upload failed: {error}")
-
-            gstr_upload_result = st.session_state.get("gstr_upload_result")
-            if gstr_upload_result:
-                st.caption(
-                    f"Latest GSTR upload ID: {gstr_upload_result['upload_id']} | Rows saved: {gstr_upload_result['records_parsed']}"
-                )
-
-    else:
-        section_card(
-            "GSTR Report Status",
-            body_html="<p>Upload a file to review the parsed structure and validation result.</p>",
+    try:
+        templates_df = load_bank_pdf_templates_dataframe()
+        edited_templates_df = st.data_editor(
+            templates_df,
+            column_order=TEMPLATE_COLUMNS,
+            use_container_width=True,
+            hide_index=True,
+            num_rows="dynamic",
+            column_config={
+                "Date Patterns": st.column_config.TextColumn("Date Patterns", help="One regex per line or comma-separated."),
+                "Opening Balance Keywords": st.column_config.TextColumn("Opening Balance Keywords"),
+                "Ignore Line Keywords": st.column_config.TextColumn("Ignore Line Keywords"),
+                "Active/Inactive": st.column_config.SelectboxColumn(
+                    "Active/Inactive",
+                    options=["Active", "Inactive"],
+                    required=True,
+                ),
+            },
+            key="bank_pdf_template_editor",
         )
+
+        validation_errors = validate_bank_pdf_templates_dataframe(edited_templates_df)
+        if validation_errors:
+            for validation_error in validation_errors:
+                st.warning(validation_error)
+
+        if st.button("Save Bank PDF Templates", type="primary", use_container_width=True):
+            result = save_bank_pdf_templates_dataframe(edited_templates_df)
+            if result["status"] == "success":
+                st.success("Bank PDF templates saved successfully.")
+                st.rerun()
+            else:
+                for error_message in result["errors"]:
+                    st.warning(error_message)
+    except Exception:
+        st.error("Bank PDF templates are temporarily unavailable. Please check the template configuration and try again.")

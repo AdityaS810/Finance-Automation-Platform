@@ -1,7 +1,7 @@
 -- ============================================================
 -- Finance Automation Platform
--- Silver Layer Views
--- Purpose: Clean and deduplicate Zoho Books bronze data
+-- Enrich Layer Views (internal dataset name: finance_silver)
+-- Purpose: Clean and deduplicate Zoho Books Raw layer data
 -- ============================================================
 
 

@@ -16,7 +16,7 @@ load_css()
 
 page_header(
     "Finance Automation Platform",
-    "Automate data sync, MIS reporting, and reconciliation from one place.",
+    "Automate data sync, MIS reporting, and reconciliation from one place. Raw captures source data, Enrich standardizes it, and Consume provides final business-ready outputs.",
 )
 
 sync_result = st.session_state.get("data_sync_result")
@@ -186,7 +186,10 @@ with content_columns[0]:
 with content_columns[1]:
     section_card(
         "Key Insights",
-        body_html="<p>Headline finance indicators for leadership review.</p>",
+        body_html=(
+            "<p>Headline finance indicators for leadership review.</p>"
+            "<p>Internal dataset names may still follow bronze/silver/gold naming, but business-facing layers are Raw, Enrich, and Consume.</p>"
+        ),
     )
     insight_row("Closing Cash", "INR 8.64 Cr", change="+12.4% vs LY", status="success")
     insight_row("Monthly Gross Burn", "INR 1.27 Cr", change="+3.6% vs LY", status="warning")

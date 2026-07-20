@@ -42,6 +42,17 @@ def _timestamp_to_json(value: Any) -> str | None:
     return str(value)
 
 
+def _json_to_metadata(value: str | None) -> dict[str, Any]:
+    """Parse stored metadata_json defensively for UI/history display."""
+    if not value:
+        return {}
+    try:
+        parsed = json.loads(value)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def _insert_run_row(
     client: bigquery.Client,
     table_ref: str,
@@ -196,3 +207,103 @@ def fail_etl_run(
     }
 
     _insert_run_row(client, table, run_id, row, "append failure for")
+
+
+def list_etl_runs(
+    project_id: str,
+    dataset_id: str,
+    source_system: str | None = None,
+    table_id: str = DEFAULT_ETL_RUNS_TABLE_ID,
+    limit: int = 25,
+) -> list[dict[str, Any]]:
+    """Return one latest status row per run_id, newest first."""
+
+    client = bigquery.Client(project=project_id)
+    table = _table_ref(project_id, dataset_id, table_id)
+    query = f"""
+        WITH ranked_runs AS (
+            SELECT
+                run_id,
+                source_system,
+                status,
+                started_at,
+                completed_at,
+                records_loaded,
+                error_message,
+                metadata_json,
+                triggered_by,
+                created_at,
+                ROW_NUMBER() OVER (
+                    PARTITION BY run_id
+                    ORDER BY created_at DESC
+                ) AS row_number
+            FROM `{table}`
+            WHERE (@source_system IS NULL OR source_system = @source_system)
+        )
+        SELECT
+            run_id,
+            source_system,
+            status,
+            started_at,
+            completed_at,
+            records_loaded,
+            error_message,
+            metadata_json,
+            triggered_by,
+            created_at
+        FROM ranked_runs
+        WHERE row_number = 1
+        ORDER BY COALESCE(completed_at, started_at) DESC, created_at DESC
+        LIMIT @limit
+    """
+    job_config = bigquery.QueryJobConfig(
+        query_parameters=[
+            bigquery.ScalarQueryParameter("source_system", "STRING", source_system),
+            bigquery.ScalarQueryParameter("limit", "INT64", max(1, min(int(limit), 100))),
+        ]
+    )
+
+    rows = list(client.query(query, job_config=job_config).result())
+    history = []
+    for row in rows:
+        started_at = row.started_at
+        completed_at = row.completed_at
+        duration_seconds = None
+        if started_at and completed_at:
+            duration_seconds = max(int((completed_at - started_at).total_seconds()), 0)
+
+        history.append(
+            {
+                "run_id": row.run_id,
+                "source_system": row.source_system,
+                "status": row.status,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "duration_seconds": duration_seconds,
+                "records_loaded": row.records_loaded,
+                "error_message": row.error_message,
+                "metadata_json": row.metadata_json,
+                "metadata": _json_to_metadata(row.metadata_json),
+                "triggered_by": row.triggered_by,
+                "created_at": row.created_at,
+            }
+        )
+
+    return history
+
+
+def get_latest_etl_run(
+    project_id: str,
+    dataset_id: str,
+    source_system: str | None = None,
+    table_id: str = DEFAULT_ETL_RUNS_TABLE_ID,
+) -> dict[str, Any] | None:
+    """Return the newest latest-status ETL run, if one exists."""
+    runs = list_etl_runs(
+        project_id=project_id,
+        dataset_id=dataset_id,
+        source_system=source_system,
+        table_id=table_id,
+        limit=1,
+    )
+    return runs[0] if runs else None

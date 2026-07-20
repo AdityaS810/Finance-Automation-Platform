@@ -1,6 +1,6 @@
 -- ============================================================
 -- Finance Automation Platform
--- Bronze organization metadata migration
+-- Raw layer organization metadata migration (internal dataset name: finance_bronze)
 -- Purpose: Add non-secret Zoho organization metadata to existing raw rows table
 -- ============================================================
 

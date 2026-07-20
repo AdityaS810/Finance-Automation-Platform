@@ -7,7 +7,15 @@ from io import BytesIO, StringIO
 import pandas as pd
 
 from src.ingestion.bank_csv_parser import parse_bank_csv, parse_bank_excel
-from src.ingestion.bank_pdf_parser import StatementLine, _transactions_from_statement_lines
+from src.ingestion.bank_pdf_parser import (
+    StatementLine,
+    _transactions_from_statement_lines,
+    get_bank_pdf_template,
+    load_bank_pdf_templates,
+    load_bank_pdf_templates_dataframe,
+    save_bank_pdf_templates_dataframe,
+    validate_bank_pdf_templates_dataframe,
+)
 from src.utils.validation import validate_required_columns
 
 
@@ -41,6 +49,101 @@ def _parse_hsbc_lines(lines: list[StatementLine]) -> pd.DataFrame:
         _transactions_from_statement_lines(lines, HSBC_COLUMNS),
         columns=["date", "narration", "debit", "credit", "balance_amount"],
     )
+
+
+def test_bank_pdf_templates_load_default_fallback_when_config_missing(tmp_path):
+    missing_config = tmp_path / "missing_bank_pdf_templates.yaml"
+
+    templates = load_bank_pdf_templates(path=missing_config)
+
+    assert templates[0]["template_name"] == "HSBC Default"
+    assert templates[0]["bank_name"] == "HSBC"
+    assert templates[0]["active"] is True
+
+
+def test_bank_pdf_missing_template_name_returns_active_default(tmp_path):
+    config_path = tmp_path / "bank_pdf_templates.yaml"
+    dataframe = load_bank_pdf_templates_dataframe(path=config_path)
+    result = save_bank_pdf_templates_dataframe(dataframe, path=config_path)
+
+    selected_template = get_bank_pdf_template("Template That Does Not Exist", path=config_path)
+
+    assert result["status"] == "success"
+    assert selected_template["template_name"] == "HSBC Default"
+
+
+def test_bank_pdf_invalid_template_config_falls_back_to_default(tmp_path):
+    config_path = tmp_path / "bank_pdf_templates.yaml"
+    config_path.write_text("bank_pdf_templates: [", encoding="utf-8")
+
+    templates = load_bank_pdf_templates(path=config_path)
+
+    assert templates[0]["template_name"] == "HSBC Default"
+    assert templates[0]["bank_name"] == "HSBC"
+
+
+def test_bank_pdf_template_config_is_readable_from_yaml(tmp_path):
+    config_path = tmp_path / "bank_pdf_templates.yaml"
+    dataframe = pd.DataFrame(
+        [
+            {
+                "Template Name": "Test Bank Template",
+                "Bank Name": "Test Bank",
+                "Statement Type": "Current Account",
+                "Date Patterns": r"\d{4}-\d{2}-\d{2}",
+                "Amount Pattern": r"\d+\.\d{2}",
+                "Opening Balance Keywords": "opening balance",
+                "Ignore Line Keywords": "page total",
+                "Debit Column X Min": "100",
+                "Debit Column X Max": "160",
+                "Credit Column X Min": "200",
+                "Credit Column X Max": "260",
+                "Balance Column X Min": "300",
+                "Balance Column X Max": "360",
+                "Active/Inactive": "Active",
+            }
+        ]
+    )
+
+    result = save_bank_pdf_templates_dataframe(dataframe, path=config_path)
+    templates = load_bank_pdf_templates(path=config_path)
+
+    assert result["status"] == "success"
+    assert templates[0]["template_name"] == "Test Bank Template"
+    assert templates[0]["bank_name"] == "Test Bank"
+    assert templates[0]["date_patterns"] == [r"\d{4}-\d{2}-\d{2}"]
+    assert templates[0]["debit_column_x_min"] == 100.0
+
+
+def test_bank_pdf_template_validation_rejects_blank_and_bad_numeric_rows():
+    dataframe = pd.DataFrame(
+        [
+            {
+                "Template Name": "",
+                "Bank Name": "",
+                "Statement Type": "",
+                "Date Patterns": "",
+                "Amount Pattern": "",
+                "Opening Balance Keywords": "",
+                "Ignore Line Keywords": "",
+                "Debit Column X Min": "left",
+                "Debit Column X Max": "",
+                "Credit Column X Min": "",
+                "Credit Column X Max": "",
+                "Balance Column X Min": "",
+                "Balance Column X Max": "",
+                "Active/Inactive": "",
+            }
+        ]
+    )
+
+    errors = validate_bank_pdf_templates_dataframe(dataframe)
+
+    assert "Template Name is required" in " ".join(errors)
+    assert "Bank Name is required" in " ".join(errors)
+    assert "Date Pattern is required" in " ".join(errors)
+    assert "Amount Pattern is required" in " ".join(errors)
+    assert "Debit Column X Min must be numeric" in " ".join(errors)
 
 
 def test_parse_bank_csv_maps_common_columns():

@@ -1,6 +1,6 @@
 -- ============================================================
 -- Finance Automation Platform
--- Silver and Gold Layer Views
+-- Enrich and Consume Layer Views (internal dataset names: finance_silver, finance_gold)
 -- Purpose: Multi-organization Zoho Books reporting with INR consolidation
 -- ============================================================
 
@@ -17,8 +17,8 @@ SELECT 'USD' AS currency_code, CAST(83.00 AS NUMERIC) AS inr_rate;
 
 
 -- ============================================================
--- Silver Layer
--- Bronze is append-only. Silver history views keep SCD2 versions, and latest
+-- Enrich Layer
+-- Raw is append-only. Enrich history views keep SCD2 versions, and latest
 -- dimension views expose the current structured record per organization and
 -- source_record_id.
 -- ============================================================
@@ -1049,8 +1049,8 @@ FROM versioned;
 
 
 -- ============================================================
--- Gold Layer
--- Gold views build on latest Silver views and report in INR.
+-- Consume Layer
+-- Consume views build on latest Enrich views and report in INR.
 -- ============================================================
 
 CREATE OR REPLACE VIEW `finance_gold.dashboard_summary` AS

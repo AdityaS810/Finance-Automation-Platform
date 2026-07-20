@@ -16,7 +16,7 @@ def load_raw_records_to_bigquery(
     id_field: str,
 ) -> None:
     """
-    Loads raw API records into a BigQuery bronze table.
+    Loads raw API records into a BigQuery Raw layer table.
     Each source record is stored as one row with full raw_json.
     """
 

@@ -5,9 +5,11 @@ from __future__ import annotations
 import re
 import logging
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import pandas as pd
+import yaml
 
 
 REQUIRED_COLUMNS = ["date", "narration", "debit", "credit", "balance_amount"]
@@ -38,6 +40,57 @@ INCOMPLETE_EXTRACTION_PAGE_THRESHOLD = 20
 INCOMPLETE_EXTRACTION_ROW_THRESHOLD = 100
 logger = logging.getLogger(__name__)
 
+DEFAULT_BANK_PDF_TEMPLATE = {
+    "template_name": "HSBC Default",
+    "bank_name": "HSBC",
+    "statement_type": "DD History",
+    "date_patterns": [
+        rf"{MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{1,2}}{DATE_SEPARATOR_PATTERN}\d{{4}}",
+        rf"\d{{1,2}}{DATE_SEPARATOR_PATTERN}{MONTH_PATTERN}{DATE_SEPARATOR_PATTERN}\d{{4}}",
+    ],
+    "amount_pattern": r"(?<![A-Za-z0-9])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?:[-+]|\s?(?:CR|DR))?(?![A-Za-z0-9])",
+    "opening_balance_keywords": ["balance b/f", "balance bf"],
+    "ignore_line_keywords": [
+        "^account number\\b",
+        "^select transaction history criteria\\b",
+        "^transaction history$",
+        "^date transaction narrative debit credit ledger balance value$",
+        "^dd history page\\b",
+        "https?://",
+        "\\bwww\\.",
+        "^url\\b",
+        "^display previous$",
+        "^display next$",
+        "^cancel$",
+        "^print form$",
+        "^display previous display next cancel print form$",
+    ],
+    "debit_column_x_min": 330.0,
+    "debit_column_x_max": 410.0,
+    "credit_column_x_min": 415.0,
+    "credit_column_x_max": 500.0,
+    "balance_column_x_min": 505.0,
+    "balance_column_x_max": 590.0,
+    "active": True,
+}
+
+TEMPLATE_COLUMNS = [
+    "Template Name",
+    "Bank Name",
+    "Statement Type",
+    "Date Patterns",
+    "Amount Pattern",
+    "Opening Balance Keywords",
+    "Ignore Line Keywords",
+    "Debit Column X Min",
+    "Debit Column X Max",
+    "Credit Column X Min",
+    "Credit Column X Max",
+    "Balance Column X Min",
+    "Balance Column X Max",
+    "Active/Inactive",
+]
+
 
 @dataclass
 class StatementLine:
@@ -47,8 +100,296 @@ class StatementLine:
     words: list[dict[str, Any]]
 
 
+@dataclass
+class BankPdfTemplateRules:
+    """Compiled parsing rules from one bank PDF template."""
+
+    template_name: str
+    bank_name: str
+    statement_type: str
+    date_patterns: list[re.Pattern]
+    amount_pattern: re.Pattern
+    opening_balance_keywords: list[str]
+    ignore_line_keywords: list[str]
+    column_positions: dict[str, float]
+
+
 def _empty_dataframe() -> pd.DataFrame:
     return pd.DataFrame(columns=REQUIRED_COLUMNS)
+
+
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
+def bank_pdf_templates_path() -> Path:
+    return _repo_root() / "config" / "bank_pdf_templates.yaml"
+
+
+def _clean_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, float) and pd.isna(value):
+        return ""
+    return str(value).strip()
+
+
+def _split_config_list(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [_clean_text(item) for item in value if _clean_text(item)]
+    text = _clean_text(value)
+    if not text:
+        return []
+    return [item.strip() for item in re.split(r"[\n,]+", text) if item.strip()]
+
+
+def _list_to_text(value: Any) -> str:
+    return "\n".join(_split_config_list(value))
+
+
+def _to_float_or_none(value: Any) -> float | None:
+    text = _clean_text(value)
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _is_active(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"active", "true", "yes", "1"}
+
+
+def _status_label(value: Any) -> str:
+    return "Active" if bool(value) else "Inactive"
+
+
+def _default_template_copy() -> dict[str, Any]:
+    return {
+        key: list(value) if isinstance(value, list) else value
+        for key, value in DEFAULT_BANK_PDF_TEMPLATE.items()
+    }
+
+
+def _read_template_config(path: Path | None = None) -> dict[str, Any]:
+    config_path = path or bank_pdf_templates_path()
+    if not config_path.exists():
+        return {"bank_pdf_templates": [_default_template_copy()]}
+    try:
+        with config_path.open("r", encoding="utf-8") as stream:
+            config = yaml.safe_load(stream) or {}
+    except Exception:
+        logger.warning("Bank PDF template config could not be read; falling back to HSBC defaults.")
+        return {"bank_pdf_templates": [_default_template_copy()]}
+
+    templates = config.get("bank_pdf_templates")
+    if not isinstance(templates, list) or not templates:
+        return {"bank_pdf_templates": [_default_template_copy()]}
+    return {"bank_pdf_templates": templates}
+
+
+def _write_template_config(config: dict[str, Any], path: Path | None = None) -> None:
+    config_path = path or bank_pdf_templates_path()
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    with config_path.open("w", encoding="utf-8") as stream:
+        yaml.safe_dump(config, stream, sort_keys=False, allow_unicode=False)
+
+
+def _normalise_template(template: dict[str, Any]) -> dict[str, Any]:
+    normalised = _default_template_copy()
+    normalised.update(template or {})
+    normalised["date_patterns"] = _split_config_list(normalised.get("date_patterns")) or list(DEFAULT_BANK_PDF_TEMPLATE["date_patterns"])
+    normalised["opening_balance_keywords"] = (
+        _split_config_list(normalised.get("opening_balance_keywords"))
+        or list(DEFAULT_BANK_PDF_TEMPLATE["opening_balance_keywords"])
+    )
+    normalised["ignore_line_keywords"] = (
+        _split_config_list(normalised.get("ignore_line_keywords"))
+        or list(DEFAULT_BANK_PDF_TEMPLATE["ignore_line_keywords"])
+    )
+    normalised["active"] = bool(normalised.get("active"))
+    return normalised
+
+
+def load_bank_pdf_templates(path: Path | None = None) -> list[dict[str, Any]]:
+    """Load bank PDF templates, falling back to the built-in HSBC template."""
+    config = _read_template_config(path)
+    templates = [_normalise_template(template) for template in config.get("bank_pdf_templates", []) if isinstance(template, dict)]
+    return templates or [_default_template_copy()]
+
+
+def active_bank_pdf_templates(path: Path | None = None) -> list[dict[str, Any]]:
+    """Return active templates, falling back to active HSBC defaults."""
+    templates = [template for template in load_bank_pdf_templates(path) if template.get("active")]
+    return templates or [_default_template_copy()]
+
+
+def load_bank_pdf_templates_dataframe(path: Path | None = None) -> pd.DataFrame:
+    """Return bank PDF templates as an editable dataframe."""
+    rows = []
+    for template in load_bank_pdf_templates(path):
+        rows.append(
+            {
+                "Template Name": _clean_text(template.get("template_name")),
+                "Bank Name": _clean_text(template.get("bank_name")),
+                "Statement Type": _clean_text(template.get("statement_type")),
+                "Date Patterns": _list_to_text(template.get("date_patterns")),
+                "Amount Pattern": _clean_text(template.get("amount_pattern")),
+                "Opening Balance Keywords": _list_to_text(template.get("opening_balance_keywords")),
+                "Ignore Line Keywords": _list_to_text(template.get("ignore_line_keywords")),
+                "Debit Column X Min": template.get("debit_column_x_min"),
+                "Debit Column X Max": template.get("debit_column_x_max"),
+                "Credit Column X Min": template.get("credit_column_x_min"),
+                "Credit Column X Max": template.get("credit_column_x_max"),
+                "Balance Column X Min": template.get("balance_column_x_min"),
+                "Balance Column X Max": template.get("balance_column_x_max"),
+                "Active/Inactive": _status_label(template.get("active")),
+            }
+        )
+    return pd.DataFrame(rows, columns=TEMPLATE_COLUMNS)
+
+
+def validate_bank_pdf_templates_dataframe(dataframe: pd.DataFrame) -> list[str]:
+    """Validate edited bank PDF template rows for user-friendly feedback."""
+    errors = []
+    if dataframe.empty:
+        return ["At least one bank PDF template is required."]
+
+    for index, row in dataframe.fillna("").iterrows():
+        row_number = index + 1
+        if not _clean_text(row.get("Template Name")):
+            errors.append(f"Row {row_number}: Template Name is required.")
+        if not _clean_text(row.get("Bank Name")):
+            errors.append(f"Row {row_number}: Bank Name is required.")
+        date_patterns = _split_config_list(row.get("Date Patterns"))
+        if not date_patterns:
+            errors.append(f"Row {row_number}: Date Pattern is required.")
+        for pattern in date_patterns:
+            try:
+                re.compile(pattern, re.IGNORECASE)
+            except re.error:
+                errors.append(f"Row {row_number}: Date Pattern is not a valid regular expression.")
+                break
+        amount_pattern = _clean_text(row.get("Amount Pattern"))
+        if not amount_pattern:
+            errors.append(f"Row {row_number}: Amount Pattern is required.")
+        else:
+            try:
+                re.compile(amount_pattern, re.IGNORECASE)
+            except re.error:
+                errors.append(f"Row {row_number}: Amount Pattern is not a valid regular expression.")
+
+        for column_name in [
+            "Debit Column X Min",
+            "Debit Column X Max",
+            "Credit Column X Min",
+            "Credit Column X Max",
+            "Balance Column X Min",
+            "Balance Column X Max",
+        ]:
+            value = _clean_text(row.get(column_name))
+            if value and _to_float_or_none(value) is None:
+                errors.append(f"Row {row_number}: {column_name} must be numeric when provided.")
+
+    return errors
+
+
+def save_bank_pdf_templates_dataframe(dataframe: pd.DataFrame, path: Path | None = None) -> dict[str, Any]:
+    """Persist edited bank PDF templates to YAML."""
+    errors = validate_bank_pdf_templates_dataframe(dataframe)
+    if errors:
+        return {"status": "error", "errors": errors, "saved_count": 0}
+
+    templates = []
+    for _, row in dataframe.fillna("").iterrows():
+        if not any(_clean_text(row.get(column)) for column in TEMPLATE_COLUMNS):
+            continue
+        templates.append(
+            {
+                "template_name": _clean_text(row.get("Template Name")),
+                "bank_name": _clean_text(row.get("Bank Name")),
+                "statement_type": _clean_text(row.get("Statement Type")),
+                "date_patterns": _split_config_list(row.get("Date Patterns")),
+                "amount_pattern": _clean_text(row.get("Amount Pattern")),
+                "opening_balance_keywords": _split_config_list(row.get("Opening Balance Keywords")),
+                "ignore_line_keywords": _split_config_list(row.get("Ignore Line Keywords")),
+                "debit_column_x_min": _to_float_or_none(row.get("Debit Column X Min")),
+                "debit_column_x_max": _to_float_or_none(row.get("Debit Column X Max")),
+                "credit_column_x_min": _to_float_or_none(row.get("Credit Column X Min")),
+                "credit_column_x_max": _to_float_or_none(row.get("Credit Column X Max")),
+                "balance_column_x_min": _to_float_or_none(row.get("Balance Column X Min")),
+                "balance_column_x_max": _to_float_or_none(row.get("Balance Column X Max")),
+                "active": _is_active(row.get("Active/Inactive")),
+            }
+        )
+
+    _write_template_config(
+        {
+            "storage_note": "Fallback local config for future migration to BigQuery.",
+            "bank_pdf_templates": templates,
+        },
+        path,
+    )
+    return {"status": "success", "errors": [], "saved_count": len(templates)}
+
+
+def _column_midpoint(template: dict[str, Any], min_key: str, max_key: str) -> float | None:
+    min_value = _to_float_or_none(template.get(min_key))
+    max_value = _to_float_or_none(template.get(max_key))
+    if min_value is not None and max_value is not None:
+        return (min_value + max_value) / 2
+    return min_value if min_value is not None else max_value
+
+
+def _compile_template_rules(template: dict[str, Any] | None = None) -> BankPdfTemplateRules:
+    cleaned_template = _normalise_template(template or _default_template_copy())
+    compiled_date_patterns = []
+    for pattern in cleaned_template.get("date_patterns", []):
+        try:
+            compiled_date_patterns.append(re.compile(pattern, re.IGNORECASE))
+        except re.error:
+            logger.warning("Ignoring invalid bank PDF date pattern in template %s.", cleaned_template.get("template_name"))
+    if not compiled_date_patterns:
+        compiled_date_patterns = [MONTH_FIRST_DATE_PATTERN, DAY_FIRST_DATE_PATTERN]
+
+    try:
+        amount_pattern = re.compile(_clean_text(cleaned_template.get("amount_pattern")), re.IGNORECASE)
+    except re.error:
+        amount_pattern = AMOUNT_PATTERN
+
+    column_positions = {}
+    debit_midpoint = _column_midpoint(cleaned_template, "debit_column_x_min", "debit_column_x_max")
+    credit_midpoint = _column_midpoint(cleaned_template, "credit_column_x_min", "credit_column_x_max")
+    balance_midpoint = _column_midpoint(cleaned_template, "balance_column_x_min", "balance_column_x_max")
+    if debit_midpoint is not None:
+        column_positions["debit"] = debit_midpoint
+    if credit_midpoint is not None:
+        column_positions["credit"] = credit_midpoint
+    if balance_midpoint is not None:
+        column_positions["balance"] = balance_midpoint
+
+    return BankPdfTemplateRules(
+        template_name=_clean_text(cleaned_template.get("template_name")) or "HSBC Default",
+        bank_name=_clean_text(cleaned_template.get("bank_name")) or "HSBC",
+        statement_type=_clean_text(cleaned_template.get("statement_type")) or "DD History",
+        date_patterns=compiled_date_patterns,
+        amount_pattern=amount_pattern,
+        opening_balance_keywords=[keyword.lower() for keyword in _split_config_list(cleaned_template.get("opening_balance_keywords"))],
+        ignore_line_keywords=_split_config_list(cleaned_template.get("ignore_line_keywords")),
+        column_positions=column_positions,
+    )
+
+
+def get_bank_pdf_template(template_name: str | None = None, path: Path | None = None) -> dict[str, Any]:
+    """Return a named active template, or the first active/default template."""
+    templates = active_bank_pdf_templates(path)
+    if template_name:
+        requested = _clean_text(template_name).lower()
+        for template in templates:
+            if _clean_text(template.get("template_name")).lower() == requested:
+                return template
+    return templates[0] if templates else _default_template_copy()
 
 
 def _parse_amount(value: Any) -> float | None:
@@ -71,9 +412,11 @@ def _parse_amount(value: Any) -> float | None:
         return None
 
 
-def _is_date_line(text: str) -> bool:
+def _is_date_line(text: str, rules: BankPdfTemplateRules | None = None) -> bool:
     """Return True when a PDF text line starts with an HSBC date."""
     stripped_text = text.strip()
+    if rules:
+        return any(pattern.match(stripped_text) for pattern in rules.date_patterns)
     return bool(MONTH_FIRST_DATE_PATTERN.match(stripped_text) or DAY_FIRST_DATE_PATTERN.match(stripped_text))
 
 
@@ -87,7 +430,7 @@ def _extract_references(value: str) -> list[str]:
     return REFERENCE_PATTERN.findall((value or "").upper())
 
 
-def _is_ignored_line(text: str) -> bool:
+def _is_ignored_line(text: str, rules: BankPdfTemplateRules | None = None) -> bool:
     """Filter HSBC page headers, footers, and browser controls."""
     normalized = re.sub(r"\s+", " ", text or "").strip().lower()
     if not normalized:
@@ -108,7 +451,8 @@ def _is_ignored_line(text: str) -> bool:
         r"^print form$",
         r"^display previous display next cancel print form$",
     ]
-    return any(re.search(pattern, normalized) for pattern in ignored_patterns)
+    configured_patterns = rules.ignore_line_keywords if rules else []
+    return any(re.search(pattern, normalized) for pattern in [*ignored_patterns, *configured_patterns])
 
 
 def _safe_seek_start(uploaded_file) -> None:
@@ -176,14 +520,14 @@ def _extract_column_positions(lines: list[StatementLine]) -> dict[str, float]:
     return positions
 
 
-def _amount_tokens(lines: list[StatementLine]) -> list[dict[str, Any]]:
+def _amount_tokens(lines: list[StatementLine], amount_pattern: re.Pattern = AMOUNT_PATTERN) -> list[dict[str, Any]]:
     """Return amount tokens in visual reading order."""
     tokens: list[dict[str, Any]] = []
     for line_index, line in enumerate(lines):
         if line.words:
             for word in line.words:
                 word_text = str(word.get("text", "")).strip()
-                if AMOUNT_PATTERN.fullmatch(word_text):
+                if amount_pattern.fullmatch(word_text):
                     tokens.append(
                         {
                             "value": word_text,
@@ -192,28 +536,38 @@ def _amount_tokens(lines: list[StatementLine]) -> list[dict[str, Any]]:
                         }
                     )
         else:
-            for match in AMOUNT_PATTERN.finditer(line.text):
+            for match in amount_pattern.finditer(line.text):
                 tokens.append({"value": match.group(0), "line_index": line_index, "x0": None})
 
     return tokens
 
 
-def _amount_tokens_for_line(line: StatementLine) -> list[dict[str, Any]]:
+def _amount_tokens_for_line(line: StatementLine, amount_pattern: re.Pattern = AMOUNT_PATTERN) -> list[dict[str, Any]]:
     """Return amount tokens from one line, preserving x position when available."""
     if line.words:
         tokens = []
         for word in line.words:
             word_text = str(word.get("text", "")).strip()
-            if AMOUNT_PATTERN.fullmatch(word_text):
+            if amount_pattern.fullmatch(word_text):
                 tokens.append({"value": word_text, "x0": float(word.get("x0", 0))})
         return sorted(tokens, key=lambda token: float(token.get("x0", 0)))
 
-    return [{"value": match.group(0), "x0": None} for match in AMOUNT_PATTERN.finditer(line.text)]
+    return [{"value": match.group(0), "x0": None} for match in amount_pattern.finditer(line.text)]
 
 
-def _strip_date_prefix(text: str) -> tuple[str | None, str]:
+def _strip_date_prefix(text: str, rules: BankPdfTemplateRules | None = None) -> tuple[str | None, str]:
     """Return a detected date and the rest of the line text."""
     stripped_text = text.strip()
+    if rules:
+        for pattern in rules.date_patterns:
+            date_match = pattern.match(stripped_text)
+            if not date_match:
+                continue
+            date_text = date_match.group(1) if date_match.groups() else date_match.group(0)
+            parsed_date = pd.to_datetime(date_text.replace("-", " "), errors="coerce")
+            if not pd.isna(parsed_date):
+                return parsed_date.strftime("%b %d %Y"), stripped_text[date_match.end() :].strip()
+
     date_match = MONTH_FIRST_DATE_PATTERN.match(stripped_text)
     if date_match:
         return date_match.group(1).replace("-", " "), stripped_text[date_match.end() :].strip()
@@ -227,12 +581,24 @@ def _strip_date_prefix(text: str) -> tuple[str | None, str]:
     return None, stripped_text
 
 
-def _extract_embedded_date(text: str) -> tuple[str | None, str]:
+def _extract_embedded_date(text: str, rules: BankPdfTemplateRules | None = None) -> tuple[str | None, str]:
     """Return a transaction date embedded before the amount columns, plus text without it."""
     stripped_text = text.strip()
-    amount_match = AMOUNT_PATTERN.search(stripped_text)
+    amount_pattern = rules.amount_pattern if rules else AMOUNT_PATTERN
+    amount_match = amount_pattern.search(stripped_text)
     search_end = amount_match.start() if amount_match else len(stripped_text)
     search_window = stripped_text[:search_end]
+
+    if rules:
+        for pattern in rules.date_patterns:
+            date_match = pattern.search(search_window)
+            if not date_match:
+                continue
+            date_text = date_match.group(1) if date_match.groups() else date_match.group(0)
+            parsed_date = pd.to_datetime(date_text.replace("-", " "), errors="coerce")
+            if not pd.isna(parsed_date):
+                cleaned_text = (stripped_text[: date_match.start()] + stripped_text[date_match.end() :]).strip()
+                return parsed_date.strftime("%b %d %Y"), _clean_narration(cleaned_text)
 
     date_match = EMBEDDED_MONTH_FIRST_DATE_PATTERN.search(search_window)
     if date_match:
@@ -250,11 +616,11 @@ def _extract_embedded_date(text: str) -> tuple[str | None, str]:
     return None, stripped_text
 
 
-def _remove_trailing_amounts(text: str) -> str:
+def _remove_trailing_amounts(text: str, amount_pattern: re.Pattern = AMOUNT_PATTERN) -> str:
     """Remove trailing amount tokens from transaction text before storing narration."""
     cleaned_text = text
     while True:
-        updated_text = AMOUNT_PATTERN.sub("", cleaned_text, count=1)
+        updated_text = amount_pattern.sub("", cleaned_text, count=1)
         if updated_text == cleaned_text:
             break
         cleaned_text = updated_text
@@ -417,6 +783,7 @@ def _incomplete_extraction_warning(pages_processed: int, rows_extracted: int) ->
 def _transactions_from_statement_lines(
     statement_lines: list[StatementLine],
     column_positions: dict[str, float],
+    rules: BankPdfTemplateRules | None = None,
 ) -> list[dict[str, Any]]:
     """Parse visual statement lines into transaction rows.
 
@@ -428,16 +795,18 @@ def _transactions_from_statement_lines(
     current_date: str | None = None
     narration_parts: list[str] = []
     pending_transaction_amount: dict[str, float] | None = None
+    amount_pattern = rules.amount_pattern if rules else AMOUNT_PATTERN
+    opening_keywords = rules.opening_balance_keywords if rules else ["balance b/f", "balance bf"]
 
     for line in statement_lines:
-        detected_date, line_text_without_date = _strip_date_prefix(line.text)
+        detected_date, line_text_without_date = _strip_date_prefix(line.text, rules)
         if detected_date:
             if current_date and detected_date != current_date and narration_parts:
                 narration_parts = []
                 pending_transaction_amount = None
             current_date = detected_date
 
-        embedded_date, line_text_without_embedded_date = _extract_embedded_date(line_text_without_date)
+        embedded_date, line_text_without_embedded_date = _extract_embedded_date(line_text_without_date, rules)
         if embedded_date:
             if current_date != embedded_date and narration_parts:
                 narration_parts = []
@@ -448,15 +817,18 @@ def _transactions_from_statement_lines(
         if not current_date:
             continue
 
-        line_narration = _remove_trailing_amounts(line_text_without_date)
-        amount_tokens = _amount_tokens_for_line(line)
+        line_narration = _remove_trailing_amounts(line_text_without_date, amount_pattern)
+        amount_tokens = _amount_tokens_for_line(line, amount_pattern)
         line_amounts = _classify_line_amounts(amount_tokens, line_narration, column_positions)
 
         if line_narration:
             narration_parts.append(line_narration)
 
         accumulated_narration = _clean_narration(" ".join(narration_parts))
-        is_opening_balance = bool(re.search(r"\bbalance\s+b/?f\b", accumulated_narration, re.IGNORECASE))
+        normalized_narration = accumulated_narration.lower()
+        is_opening_balance = bool(re.search(r"\bbalance\s+b/?f\b", accumulated_narration, re.IGNORECASE)) or any(
+            keyword in normalized_narration for keyword in opening_keywords
+        )
         has_balance = line_amounts["balance_amount"] is not None
         has_transaction_amount = bool(line_amounts["has_transaction_amount"])
 
@@ -476,7 +848,7 @@ def _transactions_from_statement_lines(
             continue
 
         if has_transaction_amount and has_balance:
-            narration = _remove_trailing_amounts(accumulated_narration)
+            narration = _remove_trailing_amounts(accumulated_narration, amount_pattern)
             row = _build_transaction_row(
                 current_date,
                 [narration],
@@ -498,7 +870,7 @@ def _transactions_from_statement_lines(
             continue
 
         if pending_transaction_amount and has_balance:
-            narration = _remove_trailing_amounts(accumulated_narration)
+            narration = _remove_trailing_amounts(accumulated_narration, amount_pattern)
             row = _build_transaction_row(
                 current_date,
                 [narration],
@@ -554,16 +926,18 @@ def _parse_transaction(
     }
 
 
-def parse_bank_pdf(uploaded_file) -> pd.DataFrame:
-    """Parse HSBC DD History PDF bank statements into normalized bank rows."""
+def parse_bank_pdf(uploaded_file, template_name: str | None = None, template_config: dict[str, Any] | None = None) -> pd.DataFrame:
+    """Parse bank PDF statements into normalized bank rows using an active template."""
     try:
         import pdfplumber
     except ImportError as error:
         raise RuntimeError("PDF parsing requires pdfplumber. Please install pdfplumber to upload bank PDFs.") from error
 
+    selected_template = template_config or get_bank_pdf_template(template_name)
+    rules = _compile_template_rules(selected_template)
     _safe_seek_start(uploaded_file)
     statement_lines: list[StatementLine] = []
-    column_positions: dict[str, float] = {}
+    column_positions: dict[str, float] = dict(rules.column_positions)
     pages_processed = 0
 
     with pdfplumber.open(uploaded_file) as pdf:
@@ -571,14 +945,15 @@ def parse_bank_pdf(uploaded_file) -> pd.DataFrame:
         for page in pdf.pages:
             page_lines, page_column_positions = _extract_lines_from_page(page)
             column_positions.update({key: value for key, value in page_column_positions.items() if key not in column_positions})
-            statement_lines.extend(line for line in page_lines if not _is_ignored_line(line.text))
+            statement_lines.extend(line for line in page_lines if not _is_ignored_line(line.text, rules))
 
-    transactions = _transactions_from_statement_lines(statement_lines, column_positions)
+    transactions = _transactions_from_statement_lines(statement_lines, column_positions, rules)
 
     if not transactions:
         print("[Bank PDF Parser] No transactions found in uploaded PDF.")
         parsed_df = _empty_dataframe()
         parsed_df.attrs["parser_debug_summary"] = _build_debug_summary(pages_processed, transactions)
+        parsed_df.attrs["parser_template"] = rules.template_name
         parsed_df.attrs["parser_first_rows"] = []
         warning_message = _incomplete_extraction_warning(pages_processed, 0)
         if warning_message:
@@ -594,6 +969,7 @@ def parse_bank_pdf(uploaded_file) -> pd.DataFrame:
 
     debug_summary = _build_debug_summary(pages_processed, transactions)
     parsed_df.attrs["parser_debug_summary"] = debug_summary
+    parsed_df.attrs["parser_template"] = rules.template_name
     parsed_df.attrs["parser_first_rows"] = _debug_first_rows(parsed_df)
     logger.info("[Bank PDF Parser] Summary: %s", debug_summary)
     print(f"[Bank PDF Parser] Summary: {debug_summary}")

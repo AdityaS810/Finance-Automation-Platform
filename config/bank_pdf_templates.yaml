@@ -1,0 +1,33 @@
+storage_note: Fallback local config for future migration to BigQuery.
+bank_pdf_templates:
+- template_name: HSBC Default
+  bank_name: HSBC
+  statement_type: DD History
+  date_patterns:
+  - (?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s-]+\d{1,2}[\s-]+\d{4}
+  - \d{1,2}[\s-]+(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[\s-]+\d{4}
+  amount_pattern: (?<![A-Za-z0-9])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)\.\d{2}(?:[-+]|\s?(?:CR|DR))?(?![A-Za-z0-9])
+  opening_balance_keywords:
+  - balance b/f
+  - balance bf
+  ignore_line_keywords:
+  - ^account number\b
+  - ^select transaction history criteria\b
+  - ^transaction history$
+  - ^date transaction narrative debit credit ledger balance value$
+  - ^dd history page\b
+  - https?://
+  - \bwww\.
+  - ^url\b
+  - ^display previous$
+  - ^display next$
+  - ^cancel$
+  - ^print form$
+  - ^display previous display next cancel print form$
+  debit_column_x_min: 330.0
+  debit_column_x_max: 410.0
+  credit_column_x_min: 415.0
+  credit_column_x_max: 500.0
+  balance_column_x_min: 505.0
+  balance_column_x_max: 590.0
+  active: true

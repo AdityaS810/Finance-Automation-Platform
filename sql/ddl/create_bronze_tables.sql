@@ -1,6 +1,6 @@
 -- ============================================================
 -- Finance Automation Platform
--- Bronze Layer Tables
+-- Raw Layer Tables (internal dataset name: finance_bronze)
 -- Purpose: Store raw Zoho Books API records in BigQuery
 -- ============================================================
 

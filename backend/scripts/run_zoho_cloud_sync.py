@@ -44,6 +44,21 @@ def main():
     organizations = get_zoho_organizations()
     total_records_loaded = 0
     run_created = False
+    row_counts = []
+    metadata = {
+        "from_date": None,
+        "to_date": None,
+        "selected_ui_from_date": None,
+        "selected_ui_to_date": None,
+        "entities": [entity.name for entity in entities],
+        "organizations_synced": [organization["org_key"] for organization in organizations],
+        "reporting_currency": "INR",
+        "extractor_date_filtering": "tracked_period_only",
+        "period_tracking_message": (
+            "Selected period is tracked for reporting visibility. Current extractor syncs latest available "
+            "Zoho records where endpoint filtering is not supported."
+        ),
+    }
 
     try:
         # Create the audit row before extraction starts. If the process fails
@@ -53,11 +68,7 @@ def main():
             dataset_id=BRONZE_DATASET_ID,
             run_id=run_id,
             source_system=SOURCE_SYSTEM,
-            metadata={
-                "entities": [entity.name for entity in entities],
-                "organizations": [organization["org_key"] for organization in organizations],
-                "reporting_currency": "INR",
-            },
+            metadata=metadata,
         )
         run_created = True
 
@@ -105,12 +116,28 @@ def main():
                     source_currency=organization["base_currency"],
                 )
                 total_records_loaded += rows_loaded
+                row_counts.append(
+                    {
+                        "org_key": org_key,
+                        "entity": entity.name,
+                        "rows_loaded": rows_loaded,
+                    }
+                )
+
+        entity_record_counts = {}
+        for row in row_counts:
+            entity_record_counts.setdefault(row["org_key"], {})[row["entity"]] = row["rows_loaded"]
 
         update_etl_run(
             project_id=project_id,
             dataset_id=BRONZE_DATASET_ID,
             run_id=run_id,
             records_loaded=total_records_loaded,
+            metadata={
+                **metadata,
+                "entity_record_counts": entity_record_counts,
+                "records_loaded": total_records_loaded,
+            },
         )
     except Exception as error:
         if run_created:

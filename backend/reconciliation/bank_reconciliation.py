@@ -1,4 +1,4 @@
-"""Deterministic bank reconciliation against accounting-side Gold data."""
+"""Deterministic bank reconciliation against accounting-side Consume data."""
 
 from __future__ import annotations
 

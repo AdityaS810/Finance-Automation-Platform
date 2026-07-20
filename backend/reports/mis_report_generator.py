@@ -105,6 +105,9 @@ MONTHLY_PREVIEW_ITEMS = [
     ("Other G&A", "other_ga"),
 ]
 
+EXCEL_ROW_LABEL_TO_RULE_KEY = {label.strip().lower(): rule_key for label, rule_key in MONTHLY_PREVIEW_ITEMS}
+EXCEL_ROW_LABEL_TO_RULE_KEY["other g&a"] = "delivery_india"
+
 
 load_dotenv()
 
@@ -142,7 +145,7 @@ def _table_name(project_id: str, view_name: str) -> str:
 
 
 def _normalise_org_filter(org_filter: str | None = None) -> str:
-    """Map UI labels and missing values to safe Gold/Silver org keys."""
+    """Map UI labels and missing values to safe organization keys."""
     if not org_filter:
         return "all"
     normalised = str(org_filter).strip().lower()
@@ -241,6 +244,66 @@ def _query_to_dataframe(client, query: str) -> pd.DataFrame:
 def _read_yaml(path: Path) -> dict[str, Any]:
     with path.open("r", encoding="utf-8") as stream:
         return yaml.safe_load(stream) or {}
+
+
+def _is_active_mapping(value: Any) -> bool:
+    return str(value).strip().lower() in {"active", "true", "yes", "1"}
+
+
+def _org_mapping_applies(mapping_org: Any, report_org_filter: str | None) -> bool:
+    mapping_value = _normalise_org_filter(_to_string(mapping_org))
+    report_value = _normalise_org_filter(report_org_filter)
+    return mapping_value == "all" or report_value == "all" or mapping_value == report_value
+
+
+def _rule_key_for_excel_label(label: Any) -> str:
+    cleaned_label = _to_string(label).strip()
+    return EXCEL_ROW_LABEL_TO_RULE_KEY.get(cleaned_label.lower()) or cleaned_label.lower().replace("&", "and").replace("/", " ").replace(" ", "_")
+
+
+def _merge_account_mapping_rules(
+    existing_rules: dict[str, Any],
+    account_mappings: list[dict[str, Any]] | None,
+    section_name: str,
+    org_filter: str | None,
+) -> dict[str, Any]:
+    """Merge active account-code mappings into legacy keyword rules."""
+    merged_rules = {rule_key: dict(rule or {}) for rule_key, rule in existing_rules.items()}
+    for mapping in account_mappings or []:
+        if not isinstance(mapping, dict) or not mapping.get("active"):
+            continue
+        if _to_string(mapping.get("excel_section")).strip().lower() != section_name:
+            continue
+        if not _org_mapping_applies(mapping.get("organization"), org_filter):
+            continue
+
+        account_id = _to_string(mapping.get("zoho_account_id")).strip()
+        account_code = _to_string(mapping.get("zoho_account_code")).strip()
+        if not account_id and not account_code:
+            continue
+
+        rule_key = _rule_key_for_excel_label(mapping.get("excel_row_label"))
+        rule = dict(merged_rules.get(rule_key, {}))
+        source_types = set(rule.get("source_types") or ["invoice", "bill", "journal"])
+        match_fields = set(rule.get("match_fields") or [])
+        match_fields.update(["account_id", "account_code", "account_name"])
+        account_ids = set(rule.get("account_ids") or [])
+        account_codes = set(rule.get("account_codes") or [])
+        if account_id:
+            account_ids.add(account_id)
+        if account_code:
+            account_codes.add(account_code)
+
+        rule.update(
+            {
+                "source_types": sorted(source_types),
+                "match_fields": sorted(match_fields),
+                "account_ids": sorted(account_ids),
+                "account_codes": sorted(account_codes),
+            }
+        )
+        merged_rules[rule_key] = rule
+    return merged_rules
 
 
 def _parse_financial_year(financial_year: str) -> tuple[int, int]:
@@ -399,7 +462,7 @@ def fetch_gold_mis_data(
     org_filter: str | None = None,
     report_period: dict[str, Any] | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Query the Gold MIS monthly view for the requested reporting window."""
+    """Query the Consume MIS monthly view for the requested reporting window."""
     from google.cloud import bigquery
 
     resolved_project_id = _get_project_id(project_id)
@@ -541,6 +604,28 @@ def fetch_detailed_mis_data(
 def _candidate_text_map(row: pd.Series, raw_payload: dict[str, Any], line_item: dict[str, Any] | None = None) -> dict[str, str]:
     line_item = line_item or {}
     return {
+        "account_id": " ".join(
+            filter(
+                None,
+                [
+                    _to_string(line_item.get("account_id")),
+                    _to_string(line_item.get("accountId")),
+                    _to_string(raw_payload.get("account_id")),
+                    _to_string(row.get("account_id")),
+                ],
+            )
+        ),
+        "account_code": " ".join(
+            filter(
+                None,
+                [
+                    _to_string(line_item.get("account_code")),
+                    _to_string(line_item.get("accountCode")),
+                    _to_string(raw_payload.get("account_code")),
+                    _to_string(row.get("account_code")),
+                ],
+            )
+        ),
         "counterparty_name": " ".join(
             filter(
                 None,
@@ -609,6 +694,18 @@ def _candidate_text_map(row: pd.Series, raw_payload: dict[str, Any], line_item: 
 
 
 def _match_rule(text_map: dict[str, str], rule: dict[str, Any]) -> bool:
+    account_ids = {str(account_id).strip().lower() for account_id in rule.get("account_ids", []) if str(account_id).strip()}
+    if account_ids:
+        candidate_ids = {part.strip().lower() for part in text_map.get("account_id", "").split() if part.strip()}
+        if account_ids.intersection(candidate_ids):
+            return True
+
+    account_codes = {str(account_code).strip().lower() for account_code in rule.get("account_codes", []) if str(account_code).strip()}
+    if account_codes:
+        candidate_codes = {part.strip().lower() for part in text_map.get("account_code", "").split() if part.strip()}
+        if account_codes.intersection(candidate_codes):
+            return True
+
     match_fields = rule.get("match_fields", [])
     haystack = " ".join(text_map.get(field, "") for field in match_fields).lower()
     if not haystack:
@@ -1310,7 +1407,7 @@ def get_mis_metrics(
     custom_start_date: date | datetime | None = None,
     custom_end_date: date | datetime | None = None,
 ) -> dict[str, str]:
-    """Return Streamlit metric-card values from real Gold layer data."""
+    """Return Streamlit metric-card values from Consume layer data."""
     financial_year_start = parse_financial_year_start(financial_year)
     report_period = get_selected_report_period(
         financial_year_start,
@@ -1485,8 +1582,19 @@ def generate_mis_report(
     journals_df = _filter_dataframe_by_date_range(journals_df, "journal_date", report_period["start_date"], report_period["end_date"])
 
     fx_rate_default = company_rules["fx_rate_inr_per_usd"]
-    revenue_rules = mapping_config.get("revenue", {})
-    expense_rules = mapping_config.get("expense", {})
+    account_mappings = mapping_config.get("account_mappings", [])
+    revenue_rules = _merge_account_mapping_rules(
+        mapping_config.get("revenue", {}),
+        account_mappings,
+        "revenue",
+        org_filter,
+    )
+    expense_rules = _merge_account_mapping_rules(
+        mapping_config.get("expense", {}),
+        account_mappings,
+        "expense",
+        org_filter,
+    )
     note_rules = mapping_config.get("note_tracking", {})
 
     mapped_totals = _aggregate_rule_totals(months, fx_rate_default, invoices_df, bills_df, journals_df, {**revenue_rules, **expense_rules})

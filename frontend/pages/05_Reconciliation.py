@@ -21,7 +21,7 @@ load_css()
 
 page_header(
     "Reconciliation",
-    "Match uploaded bank and GST data against accounting records from the warehouse.",
+    "Match uploaded bank and GST data against accounting records. Reconciliation uses final business-ready data from the Consume layer.",
 )
 
 st.markdown(
@@ -1000,7 +1000,10 @@ def _bank_stage_callback(progress_bar, status_placeholder):
 with bank_tab:
     section_card(
         "Bank Matching",
-        body_html="<p>Compares uploaded bank lines with accounting-side transactions using amount, date, and text similarity.</p>",
+        body_html=(
+            "<p>Compares uploaded bank lines with accounting-side transactions using amount, date, and text similarity.</p>"
+            "<p>Consume layer is where Excel/Reconciliation reads final business-ready data.</p>"
+        ),
     )
     selected_bank_upload = _render_upload_selector(
         "bank_statement",
@@ -1110,7 +1113,10 @@ with bank_tab:
 with gst_tab:
     section_card(
         "GST Matching",
-        body_html="<p>Compares uploaded GSTR lines with accounting GST records using GSTIN, invoice number, and tax amounts.</p>",
+        body_html=(
+            "<p>Compares uploaded GSTR lines with accounting GST records using GSTIN, invoice number, and tax amounts.</p>"
+            "<p>Consume layer is where Excel/Reconciliation reads final business-ready data.</p>"
+        ),
     )
     selected_gst_upload = _render_upload_selector(
         "gstr",

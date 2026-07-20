@@ -1,4 +1,4 @@
-"""Helpers for loading raw source records into BigQuery bronze tables."""
+"""Helpers for loading raw source records into BigQuery Raw layer tables."""
 
 from __future__ import annotations
 
@@ -25,9 +25,9 @@ def load_raw_records_to_bigquery(
     source_country: str | None = None,
     source_currency: str | None = None,
 ) -> int:
-    """Load raw API records into a generic BigQuery bronze table.
+    """Load raw API records into a generic BigQuery Raw layer table.
 
-    The bronze layer keeps one row per source record and stores the complete
+    The Raw layer keeps one row per source record and stores the complete
     source payload in ``raw_json``. This makes the loader reusable for many
     entities because it does not need to know the business columns in advance.
     """
@@ -56,7 +56,7 @@ def load_raw_records_to_bigquery(
         }
 
         # The GCS URI is optional so this loader can still write to older
-        # bronze tables that do not have a gcs_uri column.
+        # Raw layer tables that do not have a gcs_uri column.
         if gcs_uri:
             row["gcs_uri"] = gcs_uri
 

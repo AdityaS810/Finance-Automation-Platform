@@ -1,4 +1,4 @@
-"""Deterministic GST reconciliation against accounting-side Gold data."""
+"""Deterministic GST reconciliation against accounting-side Consume data."""
 
 from __future__ import annotations
 

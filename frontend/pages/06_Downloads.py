@@ -16,7 +16,7 @@ load_css()
 
 page_header(
     "Downloads",
-    "Download generated MIS reports and reconciliation outputs.",
+    "Download MIS reports and reconciliation outputs produced from the Consume layer.",
 )
 
 frontend_root = Path(__file__).resolve().parents[1]
@@ -154,7 +154,7 @@ for file_item in all_files:
 
 section_card(
     "Latest Downloads",
-    body_html="<p>Each section shows the latest XLSX export first. Older and CSV exports remain available in details.</p>",
+    body_html="<p>Each section shows the latest XLSX export first. Older and CSV exports remain available in details. Consume outputs are final business-ready files.</p>",
 )
 
 for group in EXPORT_GROUPS:

@@ -1,4 +1,4 @@
-"""Compatibility wrapper for the generic ETL bronze loader."""
+"""Compatibility wrapper for the generic ETL Raw layer loader."""
 
 from backend.etl.bronze_loader import load_raw_records_to_bigquery
 
