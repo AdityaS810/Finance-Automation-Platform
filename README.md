@@ -165,6 +165,8 @@ Data moves through Raw, Enrich, and Consume layers.
 
 Raw Layer = source/raw ingested data. Zoho Books records land in `finance_bronze.zoho_raw` with the full `raw_json` payload, run metadata, and load timestamps. Raw stores all raw versions from every sync run.
 
+`finance_bronze.zoho_raw` is the canonical Bronze source for transactions and all production Enrich/Consume views. The older `finance_bronze.zoho_transactions_raw` table is retained only for historical compatibility; new transaction syncs write to `zoho_raw` with `entity_name = 'transactions'`.
+
 Enrich Layer = cleaned/transformed/standardized data. Latest views in `finance_silver` read from Raw, filter by `entity_name`, extract typed fields, and keep the current record per `source_record_id`. Enrich history views keep every typed version with `version_number` and `is_current` for audit and change tracking.
 
 Consume Layer = final business-ready data used by MIS, GST Reconciliation, Bank Reconciliation, and dashboards. Views in `finance_gold` build on current Enrich views for dashboard totals, monthly MIS profit/loss inputs, bank reconciliation inputs, and GST reconciliation inputs.
@@ -172,6 +174,8 @@ Consume Layer = final business-ready data used by MIS, GST Reconciliation, Bank 
 Internal dataset names may still follow bronze/silver/gold naming, but business-facing layers are Raw, Enrich, and Consume. Bronze = Raw, Silver = Enrich, and Gold = Consume.
 
 MIS reports are generated from the Consume layer. MIS report generation uses Consume layer BigQuery data from `finance_gold.mis_monthly_pl` and `finance_gold.dashboard_summary`. The Streamlit MIS page writes the workbook to `frontend/outputs/MIS_PL_FY2526_generated.xlsx` with Summary, Monthly P&L, and Dashboard KPIs sheets.
+
+The Downloads page can also generate a **Vendor Payments & Transactions** Excel report from `finance_silver.dim_contacts`, `finance_silver.fact_bills`, and `finance_silver.fact_transactions`. The workbook contains Summary, Vendor Bills, Vendor Transactions, and Data Availability sheets. It keeps bill balances separate from transaction amounts and clearly notes that dedicated vendor-payment records are not currently available in the warehouse.
 
 ## Multi-Organization Zoho Sync
 

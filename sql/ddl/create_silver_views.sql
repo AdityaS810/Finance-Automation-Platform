@@ -180,7 +180,9 @@ WITH parsed AS (
     JSON_VALUE(raw_json, '$.status') AS status,
     JSON_VALUE(raw_json, '$.notes') AS notes,
     raw_json
-  FROM `internal-project-work-497507.finance_bronze.zoho_transactions_raw`
+  -- Canonical transaction source. zoho_transactions_raw is legacy-only.
+  FROM `internal-project-work-497507.finance_bronze.zoho_raw`
+  WHERE entity_name = 'transactions'
 ),
 
 deduped AS (

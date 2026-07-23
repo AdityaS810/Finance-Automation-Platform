@@ -22,6 +22,10 @@ load_dotenv()
 
 SOURCE_SYSTEM = "zoho_books"
 BRONZE_DATASET_ID = "finance_bronze"
+CANONICAL_RAW_TABLE_ID = "zoho_raw"
+# Retained in BigQuery for historical compatibility only. New transaction
+# extracts use CANONICAL_RAW_TABLE_ID because fact_transactions reads zoho_raw.
+LEGACY_TRANSACTION_RAW_TABLE_ID = "zoho_transactions_raw"
 ETL_RUNS_TABLE_ID = "etl_runs"
 PERIOD_TRACKING_MESSAGE = (
     "Selected period is tracked for reporting visibility. Current extractor syncs latest available "
@@ -62,23 +66,9 @@ def _insert_etl_run_status(
         raise RuntimeError(f"Could not record ETL run {run_id}: {errors}")
 
 
-def main():
-    project_id = os.getenv("GCP_PROJECT_ID")
-    bucket_name = os.getenv("GCS_RAW_BUCKET")
-
-    if not project_id:
-        raise ValueError("GCP_PROJECT_ID is missing in .env")
-
-    if not bucket_name:
-        raise ValueError("GCS_RAW_BUCKET is missing in .env")
-
-    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
-    today = datetime.now(timezone.utc)
-    started_at = today
-    total_records_loaded = 0
-    run_created = False
-
-    entities = [
+def get_entity_configs() -> list[dict]:
+    """Return Cloud Function entity routing with generic Raw as canonical."""
+    return [
         {
             "name": "accounts",
             "fetch_func": fetch_accounts,
@@ -100,22 +90,79 @@ def main():
         {
             "name": "expenses",
             "fetch_func": fetch_expenses,
-            "bq_table": "zoho_raw",
+            "bq_table": CANONICAL_RAW_TABLE_ID,
             "id_field": "expense_id",
         },
         {
             "name": "customer_payments",
             "fetch_func": fetch_customer_payments,
-            "bq_table": "zoho_raw",
+            "bq_table": CANONICAL_RAW_TABLE_ID,
             "id_field": "payment_id",
         },
         {
             "name": "transactions",
             "fetch_func": fetch_journals,
-            "bq_table": "zoho_transactions_raw",
+            "bq_table": CANONICAL_RAW_TABLE_ID,
             "id_field": "journal_id",
         },
     ]
+
+
+def get_source_organization_metadata() -> dict[str, str | None]:
+    """Read non-secret organization lineage fields from Cloud Function env."""
+    return {
+        "source_org_key": os.getenv("ZOHO_ORG_KEY") or "configured_zoho_organization",
+        "source_org_id": os.getenv("ZOHO_ORGANIZATION_ID"),
+        "source_org_name": os.getenv("ZOHO_ORGANIZATION_NAME"),
+        "source_country": os.getenv("ZOHO_ORGANIZATION_COUNTRY"),
+        "source_currency": os.getenv("ZOHO_ORGANIZATION_CURRENCY"),
+    }
+
+
+def load_entity_records_to_bronze(
+    project_id: str,
+    entity: dict,
+    records: list[dict],
+    run_id: str,
+    gcs_uri: str,
+    organization_metadata: dict[str, str | None],
+) -> int:
+    """Load an entity, adding standard lineage fields for generic Raw rows."""
+    loader_arguments = {
+        "project_id": project_id,
+        "dataset_id": BRONZE_DATASET_ID,
+        "table_id": entity["bq_table"],
+        "records": records,
+        "run_id": run_id,
+        "source_system": SOURCE_SYSTEM,
+        "entity_name": entity["name"],
+        "id_field": entity["id_field"],
+    }
+    if entity["bq_table"] == CANONICAL_RAW_TABLE_ID:
+        loader_arguments.update(organization_metadata)
+        loader_arguments["gcs_uri"] = gcs_uri
+
+    return load_raw_records_to_bigquery(**loader_arguments)
+
+
+def main():
+    project_id = os.getenv("GCP_PROJECT_ID")
+    bucket_name = os.getenv("GCS_RAW_BUCKET")
+
+    if not project_id:
+        raise ValueError("GCP_PROJECT_ID is missing in .env")
+
+    if not bucket_name:
+        raise ValueError("GCS_RAW_BUCKET is missing in .env")
+
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    today = datetime.now(timezone.utc)
+    started_at = today
+    total_records_loaded = 0
+    run_created = False
+
+    entities = get_entity_configs()
+    organization_metadata = get_source_organization_metadata()
     metadata = {
         "from_date": None,
         "to_date": None,
@@ -160,26 +207,24 @@ def main():
 
             print(f"Uploaded {entity['name']} to GCS: {full_gcs_path}")
 
-            load_raw_records_to_bigquery(
+            rows_loaded = load_entity_records_to_bronze(
                 project_id=project_id,
-                dataset_id="finance_bronze",
-                table_id=entity["bq_table"],
+                entity=entity,
                 records=data,
                 run_id=run_id,
-                source_system=SOURCE_SYSTEM,
-                entity_name=entity["name"],
-                id_field=entity["id_field"],
+                gcs_uri=full_gcs_path,
+                organization_metadata=organization_metadata,
             )
-            total_records_loaded += len(data)
+            total_records_loaded += rows_loaded
             row_counts.append(
                 {
                     "org_key": "configured_zoho_organization",
                     "entity": entity["name"],
-                    "rows_loaded": len(data),
+                    "rows_loaded": rows_loaded,
                     "gcs_path": full_gcs_path,
                 }
             )
-            print(f"Loaded {len(data)} {entity['name']} rows")
+            print(f"Loaded {rows_loaded} {entity['name']} rows")
 
         _insert_etl_run_status(
             project_id=project_id,

@@ -17,6 +17,8 @@ from backend.zoho.extract_zoho import fetch_entity_records
 
 load_dotenv()
 
+CANONICAL_RAW_TABLE_ID = RAW_TABLE_ID
+
 
 def build_gcs_path(org_key: str, entity_name: str, run_id: str, run_date: datetime) -> str:
     """Create a predictable partitioned path for a raw Zoho export file."""
@@ -25,6 +27,37 @@ def build_gcs_path(org_key: str, entity_name: str, run_id: str, run_date: dateti
         f"raw/zoho_books/{org_key}/{entity_name}/"
         f"year={run_date.year}/month={run_date.month:02d}/day={run_date.day:02d}/"
         f"run_id={run_id}/{entity_name}.json"
+    )
+
+
+def load_entity_records_to_bronze(
+    project_id: str,
+    entity,
+    records: list[dict],
+    run_id: str,
+    gcs_uri: str,
+    organization: dict,
+) -> int:
+    """Load one entity into the canonical generic Bronze table.
+
+    ``finance_bronze.zoho_raw`` is the canonical source for Enrich views,
+    including transaction records when a transactions entity is requested.
+    """
+    return load_raw_records_to_bigquery(
+        project_id=project_id,
+        dataset_id=BRONZE_DATASET_ID,
+        table_id=CANONICAL_RAW_TABLE_ID,
+        records=records,
+        run_id=run_id,
+        source_system=SOURCE_SYSTEM,
+        entity_name=entity.name,
+        id_field=entity.id_field,
+        gcs_uri=gcs_uri,
+        source_org_key=organization["org_key"],
+        source_org_id=organization["organization_id"],
+        source_org_name=organization["organization_name"],
+        source_country=organization["country"],
+        source_currency=organization["base_currency"],
     )
 
 
@@ -99,21 +132,13 @@ def main():
 
                 print(f"Uploaded {entity.name} for org {org_key} to GCS: {full_gcs_path}")
 
-                rows_loaded = load_raw_records_to_bigquery(
+                rows_loaded = load_entity_records_to_bronze(
                     project_id=project_id,
-                    dataset_id=BRONZE_DATASET_ID,
-                    table_id=RAW_TABLE_ID,
+                    entity=entity,
                     records=data,
                     run_id=run_id,
-                    source_system=SOURCE_SYSTEM,
-                    entity_name=entity.name,
-                    id_field=entity.id_field,
                     gcs_uri=full_gcs_path,
-                    source_org_key=org_key,
-                    source_org_id=organization_id,
-                    source_org_name=organization["organization_name"],
-                    source_country=organization["country"],
-                    source_currency=organization["base_currency"],
+                    organization=organization,
                 )
                 total_records_loaded += rows_loaded
                 row_counts.append(

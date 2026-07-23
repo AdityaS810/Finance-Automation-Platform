@@ -707,6 +707,7 @@ WITH parsed AS (
     ) AS transaction_amount,
     raw_json,
     loaded_at
+  -- Canonical transaction source. zoho_transactions_raw is legacy-only.
   FROM `finance_bronze.zoho_raw`
   WHERE entity_name = 'transactions'
 )

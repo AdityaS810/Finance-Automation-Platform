@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
 
+from backend.reports.vendor_transactions_report import (
+    PAYMENT_AVAILABILITY_NOTE,
+    fetch_vendor_filter_options,
+    generate_vendor_transactions_report,
+    safe_exception_details,
+)
 from src.ui import file_summary_card, load_css, page_header, section_card
 from src.utils.file_helpers import list_output_files
 
@@ -16,7 +22,7 @@ load_css()
 
 page_header(
     "Downloads",
-    "Download MIS reports and reconciliation outputs produced from the Consume layer.",
+    "Generate vendor workbooks and download MIS or reconciliation outputs.",
 )
 
 frontend_root = Path(__file__).resolve().parents[1]
@@ -24,6 +30,12 @@ repo_root = Path(__file__).resolve().parents[2]
 
 
 EXPORT_GROUPS = [
+    {
+        "title": "Vendor Payments & Transactions",
+        "label": "Vendor Payments & Transactions Report",
+        "empty": "No vendor reports are available yet.",
+        "keywords": ["vendor_payments_transactions"],
+    },
     {
         "title": "MIS Reports",
         "label": "MIS Report",
@@ -81,6 +93,8 @@ def _group_key(file_item: dict) -> str:
     """Classify an output file into a user-facing report group."""
     file_name = file_item["file_name"].lower()
 
+    if "vendor_payments_transactions" in file_name:
+        return "Vendor Payments & Transactions"
     if "mis" in file_name:
         return "MIS Reports"
     if "bank_reconciliation" in file_name or "bank reconciliation" in file_name:
@@ -145,6 +159,133 @@ def _older_exports_table(files: list[dict]) -> pd.DataFrame:
             for item in files
         ]
     )
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _vendor_filter_options() -> dict[str, list[str]]:
+    """Cache lightweight BigQuery filter values for the vendor report controls."""
+    return fetch_vendor_filter_options()
+
+
+section_card(
+    "Vendor Payments & Transactions",
+    body_html=(
+        "<p>Generate an Excel workbook with vendor bills, available vendor/contact transaction fields, "
+        "and a clear data-availability statement.</p>"
+    ),
+)
+st.caption(PAYMENT_AVAILABILITY_NOTE)
+
+try:
+    vendor_options = _vendor_filter_options()
+    filter_options_error = False
+except Exception:
+    vendor_options = {"organizations": [], "vendors": [], "statuses": []}
+    filter_options_error = True
+
+today = date.today()
+filter_row_one = st.columns(2)
+with filter_row_one[0]:
+    vendor_start_date = st.date_input(
+        "Start date",
+        value=today.replace(month=1, day=1),
+        key="vendor_report_start_date",
+    )
+with filter_row_one[1]:
+    vendor_end_date = st.date_input(
+        "End date",
+        value=today,
+        key="vendor_report_end_date",
+    )
+
+filter_row_two = st.columns(3)
+with filter_row_two[0]:
+    selected_organization = st.selectbox(
+        "Organization",
+        options=[None, *vendor_options["organizations"]],
+        format_func=lambda value: value or "All Organizations",
+        key="vendor_report_organization",
+    )
+with filter_row_two[1]:
+    selected_vendor = st.selectbox(
+        "Vendor",
+        options=[None, *vendor_options["vendors"]],
+        format_func=lambda value: value or "All Vendors",
+        key="vendor_report_vendor",
+    )
+with filter_row_two[2]:
+    selected_status = st.selectbox(
+        "Status",
+        options=[None, *vendor_options["statuses"]],
+        format_func=lambda value: value or "All Statuses",
+        key="vendor_report_status",
+    )
+
+if filter_options_error:
+    st.caption(
+        "Live filter values are temporarily unavailable. You can still generate the report "
+        "after BigQuery credentials are available."
+    )
+
+if st.button("Generate Report", type="primary", key="generate_vendor_report"):
+    if vendor_start_date > vendor_end_date:
+        st.session_state["vendor_report_error"] = "Start date must be on or before end date."
+        st.session_state.pop("vendor_report_result", None)
+        st.session_state.pop("vendor_report_error_details", None)
+    else:
+        try:
+            with st.spinner("Generating vendor workbook from BigQuery..."):
+                result = generate_vendor_transactions_report(
+                    start_date=vendor_start_date,
+                    end_date=vendor_end_date,
+                    organization=selected_organization,
+                    vendor=selected_vendor,
+                    status=selected_status,
+                    destination_folder=frontend_root / "outputs" / "reports",
+                )
+            st.session_state["vendor_report_result"] = result
+            st.session_state.pop("vendor_report_error", None)
+            st.session_state.pop("vendor_report_error_details", None)
+        except Exception as error:
+            st.session_state["vendor_report_error"] = "The vendor report could not be generated. Please try again."
+            st.session_state["vendor_report_error_details"] = safe_exception_details(error)
+            st.session_state.pop("vendor_report_result", None)
+
+vendor_report_error = st.session_state.get("vendor_report_error")
+vendor_report_error_details = st.session_state.get("vendor_report_error_details")
+vendor_report_result = st.session_state.get("vendor_report_result")
+if vendor_report_error:
+    st.error(vendor_report_error)
+    if vendor_report_error_details:
+        with st.expander("Technical details", expanded=False):
+            st.code(vendor_report_error_details, language="text")
+elif vendor_report_result:
+    count_columns = st.columns(3)
+    count_columns[0].metric("Vendor bills", f"{vendor_report_result['bill_rows']:,}")
+    count_columns[1].metric("Vendor transactions", f"{vendor_report_result['transaction_rows']:,}")
+    count_columns[2].metric("Total rows", f"{vendor_report_result['total_rows']:,}")
+
+    if vendor_report_result["total_rows"] == 0:
+        st.info(
+            "No vendor bills or transactions matched the selected filters. The downloaded workbook "
+            "still includes headers and data-availability notes."
+        )
+    else:
+        st.success(vendor_report_result["message"])
+
+    vendor_report_path = Path(vendor_report_result["report_path"])
+    if vendor_report_path.exists():
+        with vendor_report_path.open("rb") as vendor_report_file:
+            st.download_button(
+                "Download Excel",
+                data=vendor_report_file.read(),
+                file_name=vendor_report_path.name,
+                mime=_mime_type(vendor_report_path),
+                key=f"download_vendor_report_{vendor_report_path.name}",
+                use_container_width=True,
+            )
+else:
+    st.info("Choose filters and generate the report. Empty selections include all available organizations, vendors, or statuses.")
 
 
 all_files = _collect_output_files()
