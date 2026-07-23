@@ -9,7 +9,7 @@ import pandas as pd
 import streamlit as st
 
 from src.ui import insight_row, load_css, page_header, render_status_card_grid, section_card
-from src.utils.file_helpers import list_output_files
+from src.utils.file_helpers import get_output_root, list_output_files
 
 
 load_css()
@@ -94,11 +94,11 @@ dashboard_cards = [
 
 render_status_card_grid(dashboard_cards)
 
-project_root = Path(__file__).resolve().parents[1]
+output_root = get_output_root()
 output_files = (
-    list_output_files(project_root / "outputs")
-    + list_output_files(project_root / "outputs" / "reports")
-    + list_output_files(project_root / "outputs" / "reconciliation_exports")
+    list_output_files(output_root)
+    + list_output_files(output_root / "reports")
+    + list_output_files(output_root / "reconciliation_exports")
 )
 
 activity_rows = []

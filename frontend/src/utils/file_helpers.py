@@ -2,20 +2,33 @@
 
 from __future__ import annotations
 
+import os
+import tempfile
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_ROOT = Path(__file__).resolve().parents[2]
+PROJECT_ROOT = FRONTEND_ROOT
+
+
+def get_output_root() -> Path:
+    """Return a writable output root suitable for local use or Cloud Run."""
+    configured_root = os.getenv("FINANCE_OUTPUT_ROOT", "").strip()
+    if configured_root:
+        return Path(configured_root).expanduser()
+    if os.getenv("K_SERVICE"):
+        return Path(tempfile.gettempdir()) / "finance-automation-platform" / "outputs"
+    return FRONTEND_ROOT / "outputs"
 
 
 def ensure_directories() -> None:
     """Create the main project directories if they do not exist yet."""
     required_directories = [
-        PROJECT_ROOT / "data" / "sample_bank",
-        PROJECT_ROOT / "data" / "sample_gstr",
-        PROJECT_ROOT / "outputs",
-        PROJECT_ROOT / "outputs" / "reports",
-        PROJECT_ROOT / "outputs" / "reconciliation_exports",
+        FRONTEND_ROOT / "data" / "sample_bank",
+        FRONTEND_ROOT / "data" / "sample_gstr",
+        get_output_root(),
+        get_output_root() / "reports",
+        get_output_root() / "reconciliation_exports",
     ]
 
     for directory in required_directories:

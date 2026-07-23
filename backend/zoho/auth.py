@@ -1,7 +1,7 @@
 import os
 from datetime import datetime, timedelta, timezone
-import requests
 from dotenv import load_dotenv
+from backend.zoho.http import ZOHO_REQUEST_TIMEOUT_SECONDS, get_zoho_http_session
 
 load_dotenv()
 
@@ -32,7 +32,11 @@ def get_zoho_access_token() -> str:
         "grant_type": "refresh_token",
     }
 
-    response = requests.post(url, params=params)
+    response = get_zoho_http_session().post(
+        url,
+        params=params,
+        timeout=ZOHO_REQUEST_TIMEOUT_SECONDS,
+    )
 
     if response.status_code != 200:
         raise Exception(f"Failed to get Zoho access token: {response.text}")

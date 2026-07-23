@@ -3,19 +3,26 @@
 from __future__ import annotations
 
 from datetime import date
+from io import BytesIO
+from types import SimpleNamespace
 
 import pandas as pd
 from openpyxl import load_workbook
 
+from backend.reports import vendor_transactions_report as vendor_report
 from backend.reports.vendor_transactions_report import (
     BILL_COLUMNS,
     PAYMENT_AVAILABILITY_NOTE,
     TRANSACTION_COLUMNS,
     TRANSACTION_LINKAGE_UNAVAILABLE_NOTE,
     TRANSACTION_QUERY_COLUMN_MAP,
+    _build_bills_query,
     _build_transactions_query,
+    _query_parameters,
+    _query_to_dataframe,
     _rename_query_columns,
     create_vendor_report_workbook,
+    generate_vendor_transactions_report,
     safe_exception_details,
 )
 
@@ -152,6 +159,74 @@ def test_bigquery_safe_transaction_fields_are_renamed_for_excel():
     assert list(report_dataframe.columns) == TRANSACTION_COLUMNS
 
 
+def test_vendor_queries_push_filters_into_parameterized_sql():
+    fields = {
+        "source_org_name",
+        "vendor_id",
+        "vendor_name",
+        "bill_id",
+        "bill_number",
+        "bill_date",
+        "due_date",
+        "status",
+        "source_currency",
+        "total_amount",
+        "balance_amount",
+        "source_record_id",
+    }
+    query = _build_bills_query(
+        "project-1",
+        fields,
+        start_date=date(2026, 1, 1),
+        end_date=date(2026, 7, 23),
+        organization="Midoffice India",
+        vendor="Example Vendor",
+        status="open",
+    )
+    parameters = _query_parameters(
+        date(2026, 1, 1),
+        date(2026, 7, 23),
+        "Midoffice India",
+        "Example Vendor",
+        "open",
+    )
+
+    assert "bill_date >= @start_date" in query
+    assert "bill_date <= @end_date" in query
+    assert "organization = @organization" in query
+    assert "vendor_name = @vendor" in query
+    assert "status = @status" in query
+    assert "Example Vendor" not in query
+    assert {parameter.name for parameter in parameters} == {
+        "start_date",
+        "end_date",
+        "organization",
+        "vendor",
+        "status",
+    }
+
+
+def test_empty_bigquery_result_keeps_declared_columns():
+    class EmptyResult:
+        schema = [SimpleNamespace(name="organization"), SimpleNamespace(name="vendor_name")]
+
+        def __iter__(self):
+            return iter(())
+
+    class EmptyQueryJob:
+        def result(self):
+            return EmptyResult()
+
+    class FakeClient:
+        def query(self, query, **kwargs):
+            return EmptyQueryJob()
+
+    result = _query_to_dataframe(FakeClient(), "SELECT organization, vendor_name")
+
+    assert result.empty
+    assert list(result.columns) == ["organization", "vendor_name"]
+
+
 def test_long_identifiers_are_formatted_as_excel_text():
     workbook = create_vendor_report_workbook(_sample_bills(), _sample_transactions())
 
@@ -192,3 +267,30 @@ def test_safe_exception_details_keeps_error_and_redacts_credentials():
     assert "secret-value" not in details
     assert "abc123" not in details
     assert "[redacted]" in details
+
+
+def test_generated_vendor_report_is_in_memory_by_default(monkeypatch):
+    monkeypatch.setattr(
+        vendor_report,
+        "fetch_vendor_report_data",
+        lambda **kwargs: (
+            _sample_bills(),
+            _sample_transactions(),
+            {"transaction_vendor_fields_available": True},
+        ),
+    )
+
+    result = generate_vendor_transactions_report(
+        date(2026, 1, 1),
+        date(2026, 7, 23),
+    )
+    reopened = load_workbook(BytesIO(result["report_bytes"]), data_only=False)
+
+    assert result["report_path"] is None
+    assert result["report_name"] == "Vendor_Payments_Transactions_20260101_20260723.xlsx"
+    assert reopened.sheetnames == [
+        "Summary",
+        "Vendor Bills",
+        "Vendor Transactions",
+        "Data Availability",
+    ]

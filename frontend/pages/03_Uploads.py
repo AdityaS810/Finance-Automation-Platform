@@ -122,8 +122,6 @@ with upload_tab:
                         )
                     else:
                         st.info(f"PDF parser extracted {len(bank_df.index)} rows. Please review before saving.")
-                    print(f"[Uploads UI] PDF parser extracted row count: {len(bank_df.index)}")
-                    print(f"[Uploads UI] First 5 parsed bank rows: {bank_df.head(5).to_dict(orient='records')}")
                     if bank_df.attrs.get("parser_warning"):
                         st.warning(bank_df.attrs["parser_warning"])
 

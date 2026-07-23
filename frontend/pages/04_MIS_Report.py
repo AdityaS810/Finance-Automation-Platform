@@ -24,6 +24,7 @@ from backend.services.mis_mapping_service import (
     validate_mis_mapping_dataframe,
 )
 from src.ui import file_summary_card, load_css, metric_card, page_header, section_card
+from src.utils.file_helpers import get_output_root
 
 
 MAPPING_TABLE_COLUMNS = [
@@ -191,7 +192,7 @@ with generate_tab:
 
     if generate_clicked:
         try:
-            report_output_dir = Path(__file__).resolve().parents[2] / "outputs"
+            report_output_dir = get_output_root()
             common_report_arguments = {
                 "financial_year": selected_financial_year_start,
                 "output_dir": report_output_dir,

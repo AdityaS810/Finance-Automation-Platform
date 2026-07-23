@@ -972,9 +972,6 @@ def parse_bank_pdf(uploaded_file, template_name: str | None = None, template_con
     parsed_df.attrs["parser_template"] = rules.template_name
     parsed_df.attrs["parser_first_rows"] = _debug_first_rows(parsed_df)
     logger.info("[Bank PDF Parser] Summary: %s", debug_summary)
-    print(f"[Bank PDF Parser] Summary: {debug_summary}")
-    print(f"[Bank PDF Parser] Extracted rows: {len(parsed_df.index)}")
-    print(f"[Bank PDF Parser] First parsed rows: {parsed_df.attrs['parser_first_rows']}")
     warning_message = _incomplete_extraction_warning(pages_processed, len(parsed_df.index))
     if warning_message:
         logger.warning(warning_message)

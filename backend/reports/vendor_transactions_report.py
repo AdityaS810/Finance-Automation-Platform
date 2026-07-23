@@ -6,6 +6,7 @@ import os
 import re
 from datetime import date, datetime, timezone
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -720,7 +721,12 @@ def generate_vendor_transactions_report(
     location: str | None = None,
     client: Any | None = None,
 ) -> dict[str, Any]:
-    """Fetch BigQuery data, create the workbook, and save it for download."""
+    """Fetch BigQuery data and create an in-memory workbook for download.
+
+    ``destination_folder`` remains available for CLI and local workflows that
+    explicitly need a persisted file. Streamlit can omit it and avoid writing
+    generated reports into the application source tree.
+    """
     bills, transactions, availability = fetch_vendor_report_data(
         start_date=start_date,
         end_date=end_date,
@@ -731,9 +737,7 @@ def generate_vendor_transactions_report(
         location=location,
         client=client,
     )
-    output_folder = Path(destination_folder or Path(__file__).resolve().parents[2] / "frontend" / "outputs" / "reports")
-    output_folder.mkdir(parents=True, exist_ok=True)
-    report_path = output_folder / f"Vendor_Payments_Transactions_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
+    report_name = f"Vendor_Payments_Transactions_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
     workbook = create_vendor_report_workbook(
         bills,
         transactions,
@@ -746,9 +750,21 @@ def generate_vendor_transactions_report(
         },
         availability=availability,
     )
-    workbook.save(report_path)
+    report_buffer = BytesIO()
+    workbook.save(report_buffer)
+    report_bytes = report_buffer.getvalue()
+
+    report_path = None
+    if destination_folder is not None:
+        output_folder = Path(destination_folder)
+        output_folder.mkdir(parents=True, exist_ok=True)
+        report_path = output_folder / report_name
+        report_path.write_bytes(report_bytes)
+
     return {
         "report_path": report_path,
+        "report_name": report_name,
+        "report_bytes": report_bytes,
         "bill_rows": len(bills),
         "transaction_rows": len(transactions),
         "total_rows": len(bills) + len(transactions),

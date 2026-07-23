@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import uuid
@@ -16,6 +17,8 @@ from backend.gcp.gcs_loader import upload_json_to_gcs
 
 
 load_dotenv()
+
+logger = logging.getLogger(__name__)
 
 MONEY_QUANTIZER = Decimal("0.01")
 BANK_MONEY_COLUMNS = ["debit", "credit", "balance", "balance_amount", "amount"]
@@ -210,8 +213,7 @@ def save_bank_statement_upload(
         raise ValueError("Bank statement is missing columns: " + ", ".join(missing_columns))
 
     working_df = dataframe.copy()
-    print(f"[Upload Service] Bank upload input rows: {len(working_df.index)}")
-    print(f"[Upload Service] First 5 bank upload rows: {working_df.head(5).to_dict(orient='records')}")
+    logger.info("Preparing bank upload", extra={"row_count": len(working_df.index)})
     working_df["date"] = pd.to_datetime(working_df["date"], errors="coerce")
     if working_df["date"].isna().any():
         raise ValueError("Bank statement contains invalid values in the date column.")
@@ -235,7 +237,7 @@ def save_bank_statement_upload(
     working_df["reference_number"] = _get_optional_string_column(working_df, "reference_number")
 
     records = working_df.to_dict(orient="records")
-    print(f"[Upload Service] Bank rows prepared for save: {len(records)}")
+    logger.info("Bank upload rows prepared", extra={"row_count": len(records)})
     gcs_path = f"raw/bank_statements/upload_id={upload_id}/{original_file_name.rsplit('.', 1)[0]}.json"
     full_gcs_path = upload_json_to_gcs(
         bucket_name=bucket_name,

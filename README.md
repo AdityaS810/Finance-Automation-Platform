@@ -184,7 +184,7 @@ Required non-secret environment variables:
 - `ZOHO_ACCOUNTS_BASE_URL`
 - `ZOHO_BOOKS_BASE_URL`
 
-Optional non-secret settings include `BIGQUERY_LOCATION` (defaults to `asia-south1`), `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_AI_MODEL`, `GEMINI_MODEL`, `DEFAULT_BANK_NAME`, `DEFAULT_BANK_ACCOUNT_MASKED`, `DEFAULT_GSTR_TYPE`, and the legacy `ZOHO_ORGANIZATION_ID`.
+Optional non-secret settings include `BIGQUERY_LOCATION` (defaults to `asia-south1`), `FINANCE_OUTPUT_ROOT` (defaults to a `/tmp`-backed directory on Cloud Run), `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_AI_MODEL`, `GEMINI_MODEL`, `DEFAULT_BANK_NAME`, `DEFAULT_BANK_ACCOUNT_MASKED`, `DEFAULT_GSTR_TYPE`, and the legacy `ZOHO_ORGANIZATION_ID`.
 
 Configure these credentials as Secret Manager-backed Cloud Run environment variables:
 

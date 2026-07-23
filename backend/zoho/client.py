@@ -1,7 +1,7 @@
 import os
-import requests
 from dotenv import load_dotenv
 from backend.zoho.auth import get_zoho_access_token
+from backend.zoho.http import ZOHO_REQUEST_TIMEOUT_SECONDS, get_zoho_http_session
 
 load_dotenv()
 
@@ -29,7 +29,12 @@ def zoho_get(endpoint: str, params: dict | None = None, organization_id: str | N
 
     url = f"{books_base_url}/{endpoint}"
 
-    response = requests.get(url, headers=headers, params=params)
+    response = get_zoho_http_session().get(
+        url,
+        headers=headers,
+        params=params,
+        timeout=ZOHO_REQUEST_TIMEOUT_SECONDS,
+    )
 
     if response.status_code != 200:
         raise Exception(f"Zoho API error for {endpoint}: {response.text}")

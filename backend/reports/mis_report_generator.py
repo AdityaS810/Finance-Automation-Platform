@@ -26,6 +26,7 @@ from backend.reports.report_periods import (
 
 
 DEFAULT_PROJECT_ID = "internal-project-work-497507"
+DEFAULT_BIGQUERY_LOCATION = "asia-south1"
 MIS_MONTHLY_PL_VIEW = "finance_gold.mis_monthly_pl"
 DASHBOARD_SUMMARY_VIEW = "finance_gold.dashboard_summary"
 BRONZE_RAW_VIEW = "finance_bronze.zoho_raw"
@@ -237,9 +238,14 @@ def _safe_ratio(numerator: float, denominator: float) -> float:
     return numerator / denominator
 
 
-def _query_to_dataframe(client, query: str) -> pd.DataFrame:
+def _query_to_dataframe(client, query: str, parameters: list[Any] | None = None) -> pd.DataFrame:
     """Run a BigQuery query and convert rows to pandas without extra packages."""
-    result = client.query(query).result()
+    query_kwargs = {}
+    if parameters:
+        from google.cloud import bigquery
+
+        query_kwargs["job_config"] = bigquery.QueryJobConfig(query_parameters=parameters)
+    result = client.query(query, **query_kwargs).result()
     columns = [field.name for field in result.schema]
     rows = [dict(row.items()) for row in result]
     return pd.DataFrame(rows, columns=columns)
@@ -471,25 +477,44 @@ def fetch_gold_mis_data(
 
     resolved_project_id = _get_project_id(project_id)
     selected_org_key = _normalise_org_filter(org_filter)
-    client = bigquery.Client(project=resolved_project_id)
+    client = bigquery.Client(
+        project=resolved_project_id,
+        location=os.getenv("BIGQUERY_LOCATION") or DEFAULT_BIGQUERY_LOCATION,
+    )
     filters: list[str] = []
+    parameters: list[Any] = []
     if selected_org_key != "all":
-        filters.append(f"source_org_key = '{selected_org_key}'")
+        filters.append("source_org_key = @source_org_key")
+        parameters.append(bigquery.ScalarQueryParameter("source_org_key", "STRING", selected_org_key))
     if report_period:
-        filters.append(
-            "DATE(report_month) BETWEEN "
-            f"DATE '{_date_to_sql(report_period['start_date'])}' AND DATE '{_date_to_sql(report_period['end_date'])}'"
+        filters.append("DATE(report_month) BETWEEN @start_date AND @end_date")
+        parameters.extend(
+            [
+                bigquery.ScalarQueryParameter("start_date", "DATE", report_period["start_date"]),
+                bigquery.ScalarQueryParameter("end_date", "DATE", report_period["end_date"]),
+            ]
         )
     where_clause = f"WHERE {' AND '.join(filters)}" if filters else ""
 
     monthly_query = f"""
-        SELECT *
+        SELECT
+            source_org_key,
+            source_org_name,
+            reporting_currency,
+            report_month,
+            invoice_count,
+            bill_count,
+            journal_count,
+            revenue_amount,
+            expense_amount,
+            journal_adjustment_amount,
+            profit_amount
         FROM {_table_name(resolved_project_id, MIS_MONTHLY_PL_VIEW)}
         {where_clause}
         ORDER BY report_month
     """
 
-    monthly_pl_df = _query_to_dataframe(client, monthly_query)
+    monthly_pl_df = _query_to_dataframe(client, monthly_query, parameters)
     return monthly_pl_df, pd.DataFrame()
 
 

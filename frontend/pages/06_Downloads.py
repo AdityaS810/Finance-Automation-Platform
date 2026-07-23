@@ -15,7 +15,8 @@ from backend.reports.vendor_transactions_report import (
     safe_exception_details,
 )
 from src.ui import file_summary_card, load_css, page_header, section_card
-from src.utils.file_helpers import list_output_files
+from src.utils.cloud_clients import get_bigquery_client
+from src.utils.file_helpers import get_output_root, list_output_files
 
 
 load_css()
@@ -65,7 +66,11 @@ EXPORT_GROUPS = [
 
 def _collect_output_files() -> list[dict]:
     """Collect output files from current and legacy output folders."""
+    runtime_output_root = get_output_root()
     folders = [
+        runtime_output_root,
+        runtime_output_root / "reports",
+        runtime_output_root / "reconciliation_exports",
         frontend_root / "outputs",
         frontend_root / "outputs" / "reports",
         frontend_root / "outputs" / "reconciliation_exports",
@@ -164,7 +169,7 @@ def _older_exports_table(files: list[dict]) -> pd.DataFrame:
 @st.cache_data(ttl=300, show_spinner=False)
 def _vendor_filter_options() -> dict[str, list[str]]:
     """Cache lightweight BigQuery filter values for the vendor report controls."""
-    return fetch_vendor_filter_options()
+    return fetch_vendor_filter_options(client=get_bigquery_client())
 
 
 section_card(
@@ -241,7 +246,7 @@ if st.button("Generate Report", type="primary", key="generate_vendor_report"):
                     organization=selected_organization,
                     vendor=selected_vendor,
                     status=selected_status,
-                    destination_folder=frontend_root / "outputs" / "reports",
+                    client=get_bigquery_client(),
                 )
             st.session_state["vendor_report_result"] = result
             st.session_state.pop("vendor_report_error", None)
@@ -273,17 +278,15 @@ elif vendor_report_result:
     else:
         st.success(vendor_report_result["message"])
 
-    vendor_report_path = Path(vendor_report_result["report_path"])
-    if vendor_report_path.exists():
-        with vendor_report_path.open("rb") as vendor_report_file:
-            st.download_button(
-                "Download Excel",
-                data=vendor_report_file.read(),
-                file_name=vendor_report_path.name,
-                mime=_mime_type(vendor_report_path),
-                key=f"download_vendor_report_{vendor_report_path.name}",
-                use_container_width=True,
-            )
+    report_name = vendor_report_result["report_name"]
+    st.download_button(
+        "Download Excel",
+        data=vendor_report_result["report_bytes"],
+        file_name=report_name,
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_vendor_report_{report_name}",
+        use_container_width=True,
+    )
 else:
     st.info("Choose filters and generate the report. Empty selections include all available organizations, vendors, or statuses.")
 

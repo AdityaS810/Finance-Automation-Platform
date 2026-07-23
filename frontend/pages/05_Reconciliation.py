@@ -15,6 +15,7 @@ from backend.reconciliation.gst_reconciliation import run_gst_reconciliation
 from backend.reconciliation.upload_registry import fetch_reconciliation_uploads
 from backend.services.upload_service import delete_bank_upload, delete_gstr_upload
 from src.ui import file_summary_card, load_css, page_header, section_card
+from src.utils.file_helpers import get_output_root
 
 
 load_css()
@@ -111,7 +112,7 @@ st.markdown(
 )
 
 bank_tab, gst_tab = st.tabs(["Bank Reconciliation", "GST Reconciliation"])
-output_dir = Path(__file__).resolve().parents[1] / "outputs" / "reconciliation_exports"
+output_dir = get_output_root() / "reconciliation_exports"
 AI_PREVIEW_COLUMNS = [
     "match_status",
     "confidence_score",

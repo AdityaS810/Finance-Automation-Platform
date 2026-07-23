@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import pandas as pd
+from google.cloud import bigquery
 from openpyxl import load_workbook
 
+from backend.reports import mis_report_generator as mis_report
 from backend.reports.mis_report_generator import (
     generate_consolidated_balance_sheet_report,
     generate_consolidated_pl_report,
@@ -480,3 +483,51 @@ def test_generate_mis_report_creates_half_year_report(workspace_tmp_path):
     assert monthly_ws["C3"].value == "Apr 25"
     assert monthly_ws["H3"].value == "Sep 25"
     assert monthly_ws.column_dimensions["I"].hidden is True
+
+
+def test_gold_mis_query_uses_explicit_columns_and_parameters(monkeypatch):
+    captured = {}
+
+    class EmptyResult:
+        schema = []
+
+        def __iter__(self):
+            return iter(())
+
+    class FakeQueryJob:
+        def result(self):
+            return EmptyResult()
+
+    class FakeClient:
+        def __init__(self, project, location):
+            captured["project"] = project
+            captured["location"] = location
+
+        def query(self, query, **kwargs):
+            captured["query"] = query
+            captured["job_config"] = kwargs["job_config"]
+            return FakeQueryJob()
+
+    monkeypatch.setattr(bigquery, "Client", FakeClient)
+
+    monthly_df, dashboard_df = mis_report.fetch_gold_mis_data(
+        project_id="project-1",
+        org_filter="india",
+        report_period={
+            "start_date": date(2025, 4, 1),
+            "end_date": date(2026, 3, 31),
+        },
+    )
+
+    assert monthly_df.empty
+    assert dashboard_df.empty
+    assert captured["location"] == "asia-south1"
+    assert "SELECT *" not in captured["query"]
+    assert "source_org_key = @source_org_key" in captured["query"]
+    assert "DATE(report_month) BETWEEN @start_date AND @end_date" in captured["query"]
+    assert "india" not in captured["query"]
+    assert {parameter.name for parameter in captured["job_config"].query_parameters} == {
+        "source_org_key",
+        "start_date",
+        "end_date",
+    }
