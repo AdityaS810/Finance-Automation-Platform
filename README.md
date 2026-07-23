@@ -159,6 +159,42 @@ Activate virtual environment:
 .\.venv\Scripts\activate
 ```
 
+## Google Cloud Run Deployment
+
+The Streamlit service is deployed with these settings:
+
+- Service: `finance-automation-platform`
+- Project: `internal-project-work-497507`
+- Region: `asia-south1`
+- Container port: the Cloud Run `PORT` value, with `8080` as the local fallback
+
+Build and deploy from the repository root:
+
+```powershell
+gcloud run deploy finance-automation-platform `
+  --source . `
+  --project internal-project-work-497507 `
+  --region asia-south1
+```
+
+Required non-secret environment variables:
+
+- `GCP_PROJECT_ID=internal-project-work-497507`
+- `GCS_RAW_BUCKET=finance-automation-raw-internal-project-work-497507`
+- `ZOHO_ACCOUNTS_BASE_URL`
+- `ZOHO_BOOKS_BASE_URL`
+
+Optional non-secret settings include `BIGQUERY_LOCATION` (defaults to `asia-south1`), `VERTEX_AI_PROJECT_ID`, `VERTEX_AI_LOCATION`, `VERTEX_AI_MODEL`, `GEMINI_MODEL`, `DEFAULT_BANK_NAME`, `DEFAULT_BANK_ACCOUNT_MASKED`, `DEFAULT_GSTR_TYPE`, and the legacy `ZOHO_ORGANIZATION_ID`.
+
+Configure these credentials as Secret Manager-backed Cloud Run environment variables:
+
+- `ZOHO_CLIENT_ID`
+- `ZOHO_CLIENT_SECRET`
+- `ZOHO_REFRESH_TOKEN`
+- `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) when API-key Gemini features are enabled
+
+Do not pass or package `.env`. Grant the Cloud Run service account access to BigQuery, Cloud Storage, Vertex AI (when used), and only the required Secret Manager secrets.
+
 ## Data Warehouse Layers
 
 Data moves through Raw, Enrich, and Consume layers.
