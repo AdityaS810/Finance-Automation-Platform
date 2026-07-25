@@ -165,46 +165,110 @@ WITH raw_parsed AS (
     raw.source_currency,
     raw.source_record_id,
     COALESCE(NULLIF(raw.source_record_id, ''), NULLIF(JSON_VALUE(raw.raw_json, '$.transaction_id'), '')) AS transaction_id,
+    NULLIF(JSON_VALUE(raw.raw_json, '$.account_id'), '') AS account_id,
+    JSON_VALUE(raw.raw_json, '$.account_name') AS account_name,
+    SAFE_CAST(JSON_VALUE(raw.raw_json, '$.date') AS DATE) AS transaction_date,
+    JSON_VALUE(raw.raw_json, '$.transaction_type') AS transaction_type,
+    JSON_VALUE(raw.raw_json, '$.reference_number') AS reference_number,
+    JSON_VALUE(raw.raw_json, '$.description') AS description,
+    JSON_VALUE(raw.raw_json, '$.status') AS status,
+    NULLIF(LOWER(JSON_VALUE(raw.raw_json, '$.debit_or_credit')), '') AS debit_or_credit,
+    COALESCE(JSON_VALUE(raw.raw_json, '$.currency_code'), raw.source_currency, 'INR') AS original_currency,
+    SAFE_CAST(JSON_VALUE(raw.raw_json, '$.amount') AS NUMERIC) AS transaction_amount,
     raw.raw_json,
+    TO_HEX(SHA256(raw.raw_json)) AS raw_payload_hash,
     raw.loaded_at
   FROM `finance_bronze.zoho_raw` raw
   WHERE raw.entity_name = 'bank_transactions'
 ),
-latest AS (
-  SELECT *
-  FROM raw_parsed
-  QUALIFY ROW_NUMBER() OVER (
-    PARTITION BY source_org_id, transaction_id
-    ORDER BY loaded_at DESC, run_id DESC, TO_HEX(SHA256(raw_json)) DESC
-  ) = 1
-),
-parsed AS (
+keyed AS (
   SELECT
-    run_id,
-    source_org_key,
-    source_org_id,
-    source_org_name,
-    source_country,
-    source_currency,
-    source_record_id,
-    transaction_id,
-    JSON_VALUE(raw_json, '$.account_id') AS account_id,
-    JSON_VALUE(raw_json, '$.account_name') AS account_name,
-    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS transaction_date,
-    JSON_VALUE(raw_json, '$.transaction_type') AS transaction_type,
-    JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
-    JSON_VALUE(raw_json, '$.description') AS description,
-    JSON_VALUE(raw_json, '$.status') AS status,
-    LOWER(JSON_VALUE(raw_json, '$.debit_or_credit')) AS debit_or_credit,
-    COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
-    SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC) AS transaction_amount,
-    loaded_at,
-    raw_json
+    raw_parsed.*,
+    transaction_id IS NULL OR account_id IS NULL OR debit_or_credit IS NULL
+      AS bank_transaction_leg_key_fallback,
+    TO_HEX(
+      SHA256(
+        CASE
+          WHEN transaction_id IS NULL OR account_id IS NULL OR debit_or_credit IS NULL
+            THEN CONCAT(
+              'fallback|',
+              COALESCE(source_org_id, 'legacy'),
+              '|',
+              COALESCE(transaction_id, '<missing-transaction>'),
+              '|',
+              COALESCE(account_id, '<missing-account>'),
+              '|',
+              COALESCE(debit_or_credit, '<missing-direction>'),
+              '|',
+              raw_payload_hash
+            )
+          ELSE CONCAT(
+            'leg|',
+            COALESCE(source_org_id, 'legacy'),
+            '|',
+            transaction_id,
+            '|',
+            account_id,
+            '|',
+            debit_or_credit
+          )
+        END
+      )
+    ) AS bank_transaction_leg_key
+  FROM raw_parsed
+),
+snapshot_profile AS (
+  SELECT
+    bank_transaction_leg_key,
+    COUNT(*) AS leg_snapshot_count,
+    COUNT(DISTINCT raw_payload_hash) AS leg_snapshot_payload_versions
+  FROM keyed
+  GROUP BY bank_transaction_leg_key
+),
+ranked AS (
+  SELECT
+    keyed.*,
+    DENSE_RANK() OVER (
+      PARTITION BY bank_transaction_leg_key
+      ORDER BY loaded_at DESC, run_id DESC
+    ) AS latest_snapshot_rank,
+    ROW_NUMBER() OVER (
+      PARTITION BY bank_transaction_leg_key
+      ORDER BY loaded_at DESC, run_id DESC, raw_payload_hash DESC
+    ) AS selected_snapshot_rank
+  FROM keyed
+),
+latest_conflicts AS (
+  SELECT
+    bank_transaction_leg_key,
+    COUNT(DISTINCT raw_payload_hash) > 1 AS conflicting_latest_snapshots
+  FROM ranked
+  WHERE latest_snapshot_rank = 1
+  GROUP BY bank_transaction_leg_key
+),
+latest AS (
+  SELECT * EXCEPT(latest_snapshot_rank, selected_snapshot_rank)
+  FROM ranked
+  WHERE selected_snapshot_rank = 1
+),
+current_legs AS (
+  SELECT
+    latest.*,
+    snapshot_profile.leg_snapshot_count,
+    snapshot_profile.leg_snapshot_payload_versions,
+    COALESCE(latest_conflicts.conflicting_latest_snapshots, FALSE)
+      AS conflicting_latest_snapshots,
+    transaction_id IS NOT NULL
+      AND COUNT(*) OVER (
+        PARTITION BY source_org_id, transaction_id
+      ) > 1 AS multi_leg_transaction
   FROM latest
+  JOIN snapshot_profile USING (bank_transaction_leg_key)
+  LEFT JOIN latest_conflicts USING (bank_transaction_leg_key)
 ),
 quality AS (
   SELECT
-    parsed.*,
+    current_legs.* EXCEPT(raw_payload_hash),
     CASE
       WHEN debit_or_credit = 'debit' THEN -ABS(transaction_amount)
       WHEN debit_or_credit = 'credit' THEN ABS(transaction_amount)
@@ -221,6 +285,7 @@ quality AS (
       WHEN transaction_date IS NULL THEN 'Needs Review'
       WHEN transaction_amount IS NULL THEN 'Needs Review'
       WHEN debit_or_credit NOT IN ('debit', 'credit') OR debit_or_credit IS NULL THEN 'Needs Review'
+      WHEN conflicting_latest_snapshots THEN 'Needs Review'
       ELSE 'Valid'
     END AS bank_data_quality_status,
     CASE
@@ -230,9 +295,10 @@ quality AS (
       WHEN transaction_amount IS NULL THEN 'Missing or invalid amount'
       WHEN debit_or_credit NOT IN ('debit', 'credit') OR debit_or_credit IS NULL
         THEN 'Missing or unsupported debit_or_credit'
+      WHEN conflicting_latest_snapshots THEN 'Conflicting latest snapshots for bank transaction leg'
       ELSE CAST(NULL AS STRING)
     END AS bank_data_quality_reason
-  FROM parsed
+  FROM current_legs
 )
 SELECT
   quality.*,

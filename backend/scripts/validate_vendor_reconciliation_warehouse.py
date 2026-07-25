@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 from collections import Counter
@@ -14,6 +15,68 @@ from google.cloud import bigquery
 
 
 load_dotenv()
+
+EXPECTED_BANK_SILVER_METRICS = {
+    "india": {
+        "transaction_count": 499,
+        "debit_count": 91,
+        "credit_count": 408,
+        "unknown_direction_count": 0,
+        "total_debit": Decimal("199697358.54"),
+        "total_credit": Decimal("170181659.34"),
+    },
+    "us": {
+        "transaction_count": 96,
+        "debit_count": 20,
+        "credit_count": 76,
+        "unknown_direction_count": 0,
+        "total_debit": Decimal("776897.95"),
+        "total_credit": Decimal("658747.56"),
+    },
+}
+
+
+def build_bank_transaction_leg_key(
+    record: Mapping[str, Any],
+    source_org_id: str | None,
+) -> tuple[str, bool]:
+    """Build the Phase 3.5 bank-leg key and report whether fallback was required."""
+    transaction_id = str(record.get("transaction_id") or "").strip()
+    account_id = str(record.get("account_id") or "").strip()
+    debit_or_credit = str(record.get("debit_or_credit") or "").strip().lower()
+    organization_id = str(source_org_id or "legacy")
+    missing_component = not transaction_id or not account_id or not debit_or_credit
+    if missing_component:
+        payload = json.dumps(record, default=str, sort_keys=True, separators=(",", ":"))
+        payload_hash = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        material = (
+            f"fallback|{organization_id}|{transaction_id or '<missing-transaction>'}|"
+            f"{account_id or '<missing-account>'}|{debit_or_credit or '<missing-direction>'}|"
+            f"{payload_hash}"
+        )
+    else:
+        material = f"leg|{organization_id}|{transaction_id}|{account_id}|{debit_or_credit}"
+    return hashlib.sha256(material.encode("utf-8")).hexdigest().upper(), missing_component
+
+
+def compare_expected_bank_silver_metrics(
+    rows: Iterable[Mapping[str, Any]],
+) -> list[str]:
+    """Return safe field-level differences from the Phase 3.5 expected aggregates."""
+    indexed = {str(row.get("org_key")): row for row in rows}
+    differences = []
+    for org_key, expected_fields in EXPECTED_BANK_SILVER_METRICS.items():
+        actual = indexed.get(org_key)
+        if actual is None:
+            differences.append(f"{org_key}:missing_result")
+            continue
+        for field, expected in expected_fields.items():
+            actual_value = actual.get(field)
+            if isinstance(expected, Decimal):
+                actual_value = Decimal(str(actual_value or 0))
+            if actual_value != expected:
+                differences.append(f"{org_key}:{field}:expected={expected}:actual={actual_value}")
+    return differences
 
 
 def count_duplicate_ids(records: Iterable[Mapping[str, Any]], id_field: str) -> int:
@@ -63,6 +126,74 @@ def validate_allocation_relationships(
 
 
 VALIDATION_QUERIES = {
+    "bank_leg_candidate_profiles": """
+      WITH base AS (
+        SELECT
+          run_id,
+          COALESCE(source_org_key, 'legacy') AS org_key,
+          COALESCE(source_org_id, 'legacy') AS source_org_id,
+          COALESCE(
+            NULLIF(source_record_id, ''),
+            NULLIF(JSON_VALUE(raw_json, '$.transaction_id'), ''),
+            '<missing-transaction>'
+          ) AS transaction_id,
+          COALESCE(NULLIF(JSON_VALUE(raw_json, '$.account_id'), ''), '<missing-account>') AS account_id,
+          COALESCE(NULLIF(LOWER(JSON_VALUE(raw_json, '$.debit_or_credit')), ''), '<missing-direction>') AS debit_or_credit,
+          COALESCE(NULLIF(JSON_VALUE(raw_json, '$.transaction_type'), ''), '<missing-type>') AS transaction_type,
+          TO_HEX(SHA256(raw_json)) AS payload_hash
+        FROM `finance_bronze.zoho_raw`
+        WHERE entity_name = 'bank_transactions'
+      ),
+      candidates AS (
+        SELECT
+          'org+transaction+account+direction' AS candidate,
+          *,
+          TO_HEX(SHA256(CONCAT(source_org_id, '|', transaction_id, '|', account_id, '|', debit_or_credit))) AS candidate_key
+        FROM base
+        UNION ALL
+        SELECT
+          'org+transaction+account+direction+type',
+          *,
+          TO_HEX(SHA256(CONCAT(
+            source_org_id, '|', transaction_id, '|', account_id, '|', debit_or_credit, '|', transaction_type
+          )))
+        FROM base
+      ),
+      grouped AS (
+        SELECT
+          candidate,
+          org_key,
+          candidate_key,
+          COUNT(*) AS row_count,
+          COUNT(DISTINCT run_id) AS run_count,
+          COUNT(DISTINCT payload_hash) AS payload_versions
+        FROM candidates
+        GROUP BY candidate, org_key, candidate_key
+      ),
+      same_run_collisions AS (
+        SELECT candidate, org_key, COUNT(*) AS same_run_collision_groups
+        FROM (
+          SELECT candidate, org_key, candidate_key, run_id
+          FROM candidates
+          GROUP BY candidate, org_key, candidate_key, run_id
+          HAVING COUNT(*) > 1
+        )
+        GROUP BY candidate, org_key
+      )
+      SELECT
+        grouped.candidate,
+        grouped.org_key,
+        SUM(grouped.row_count) AS total_bronze_rows,
+        COUNT(*) AS distinct_candidate_keys,
+        COUNTIF(grouped.row_count > 1) AS collision_groups,
+        COUNTIF(grouped.payload_versions > 1) AS conflicting_payload_groups,
+        COUNTIF(grouped.run_count > 1) AS repeated_snapshot_keys,
+        COALESCE(MAX(same_run_collisions.same_run_collision_groups), 0) AS same_run_collision_groups
+      FROM grouped
+      LEFT JOIN same_run_collisions USING (candidate, org_key)
+      GROUP BY grouped.candidate, grouped.org_key
+      ORDER BY grouped.candidate, grouped.org_key
+    """,
     "bronze": """
       WITH grid AS (
         SELECT org_key, entity_name
@@ -270,13 +401,21 @@ VALIDATION_QUERIES = {
           source_org_key AS org_key,
           COUNT(*) AS transaction_count,
           COUNT(DISTINCT transaction_id) AS distinct_transaction_ids,
+          COUNT(DISTINCT bank_transaction_leg_key) AS distinct_leg_keys,
           COUNTIF(debit_or_credit = 'debit') AS debit_count,
           COUNTIF(debit_or_credit = 'credit') AS credit_count,
           COUNTIF(debit_or_credit NOT IN ('debit', 'credit') OR debit_or_credit IS NULL) AS unknown_direction_count,
           SUM(IF(debit_or_credit = 'debit', ABS(transaction_amount), 0)) AS total_debit,
           SUM(IF(debit_or_credit = 'credit', ABS(transaction_amount), 0)) AS total_credit,
           STRING_AGG(DISTINCT original_currency ORDER BY original_currency) AS currencies,
-          COUNTIF(transaction_id IS NULL OR transaction_id = '') AS missing_transaction_ids
+          COUNTIF(transaction_id IS NULL OR transaction_id = '') AS missing_transaction_ids,
+          COUNTIF(account_id IS NULL OR account_id = '') AS missing_account_ids,
+          COUNTIF(debit_or_credit IS NULL OR debit_or_credit = '') AS missing_directions,
+          COUNTIF(bank_transaction_leg_key_fallback) AS fallback_leg_keys,
+          COUNTIF(conflicting_latest_snapshots) AS conflicting_latest_leg_snapshots,
+          COUNTIF(multi_leg_transaction) AS multi_leg_rows,
+          COUNT(DISTINCT IF(multi_leg_transaction, transaction_id, NULL)) AS multi_leg_transaction_ids,
+          MAX(leg_snapshot_count) AS maximum_snapshots_per_leg
         FROM `finance_silver.fact_bank_transactions`
         GROUP BY org_key
       )
@@ -284,6 +423,7 @@ VALIDATION_QUERIES = {
         grid.org_key,
         COALESCE(transaction_count, 0) AS transaction_count,
         COALESCE(distinct_transaction_ids, 0) AS distinct_transaction_ids,
+        COALESCE(distinct_leg_keys, 0) AS distinct_leg_keys,
         COALESCE(debit_count, 0) AS debit_count,
         COALESCE(credit_count, 0) AS credit_count,
         COALESCE(unknown_direction_count, 0) AS unknown_direction_count,
@@ -291,7 +431,14 @@ VALIDATION_QUERIES = {
         COALESCE(total_credit, 0) AS total_credit,
         currencies,
         COALESCE(missing_transaction_ids, 0) AS missing_transaction_ids,
-        COALESCE(transaction_count - distinct_transaction_ids, 0) AS duplicate_transaction_ids
+        COALESCE(missing_account_ids, 0) AS missing_account_ids,
+        COALESCE(missing_directions, 0) AS missing_directions,
+        COALESCE(fallback_leg_keys, 0) AS fallback_leg_keys,
+        COALESCE(conflicting_latest_leg_snapshots, 0) AS conflicting_latest_leg_snapshots,
+        COALESCE(multi_leg_rows, 0) AS multi_leg_rows,
+        COALESCE(multi_leg_transaction_ids, 0) AS multi_leg_transaction_ids,
+        COALESCE(maximum_snapshots_per_leg, 0) AS maximum_snapshots_per_leg,
+        COALESCE(transaction_count - distinct_leg_keys, 0) AS duplicate_leg_keys
       FROM grid LEFT JOIN metrics USING (org_key)
       ORDER BY org_key
     """,
@@ -417,6 +564,9 @@ def run_validation(run_id: str) -> dict[str, list[dict[str, Any]]]:
         rows = [dict(row.items()) for row in client.query(query, job_config=job_config, location=location).result()]
         results[check_name] = rows
         print(f"{check_name}={json.dumps(rows, default=_json_default, sort_keys=True)}")
+    expected_differences = compare_expected_bank_silver_metrics(results["bank_transactions"])
+    results["bank_expected_differences"] = [{"difference": value} for value in expected_differences]
+    print(f"bank_expected_differences={json.dumps(expected_differences, sort_keys=True)}")
     return results
 
 

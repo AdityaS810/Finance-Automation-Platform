@@ -49,9 +49,21 @@ def read_validated_statements(path: Path = MIGRATION_PATH) -> list[tuple[str, st
     return validated
 
 
-def apply_migration(*, execute: bool = False) -> list[str]:
-    """Validate the migration and optionally apply it to BigQuery."""
+def apply_migration(
+    *,
+    execute: bool = False,
+    selected_view: str | None = None,
+) -> list[str]:
+    """Validate the migration and optionally apply all or one authorized view."""
     statements = read_validated_statements()
+    if selected_view is not None:
+        if selected_view not in EXPECTED_VIEWS:
+            raise ValueError(f"Unsupported Silver view selection: {selected_view}")
+        statements = [
+            (view_name, statement)
+            for view_name, statement in statements
+            if view_name == selected_view
+        ]
     view_names = [view_name for view_name, _ in statements]
     if not execute:
         for view_name in view_names:
@@ -74,10 +86,15 @@ def main() -> int:
     parser.add_argument(
         "--execute",
         action="store_true",
-        help="Apply the three views. Omit to validate scope without BigQuery writes.",
+        help="Apply the selected authorized view(s). Omit for read-only validation.",
+    )
+    parser.add_argument(
+        "--view",
+        choices=EXPECTED_VIEWS,
+        help="Apply or validate only one authorized view.",
     )
     args = parser.parse_args()
-    apply_migration(execute=args.execute)
+    apply_migration(execute=args.execute, selected_view=args.view)
     return 0
 
 

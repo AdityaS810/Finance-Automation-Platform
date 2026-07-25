@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+from collections import Counter
 from decimal import Decimal
 from pathlib import Path
 
@@ -11,11 +12,17 @@ import pytest
 from backend.config.zoho_entities import DEFAULT_ZOHO_ENTITY_NAMES, ZOHO_ENTITY_CONFIGS
 from backend.scripts import run_zoho_cloud_sync as backend_cloud_sync
 from backend.scripts.debug.validate_bank_transactions_live import summarize_bank_transactions
+from backend.scripts.validate_vendor_reconciliation_warehouse import (
+    VALIDATION_QUERIES,
+    build_bank_transaction_leg_key,
+    compare_expected_bank_silver_metrics,
+)
 from backend.zoho import extract_zoho
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-SILVER_SQL_PATH = REPO_ROOT / "sql" / "ddl" / "create_silver_gold_views.sql"
+SILVER_SQL_PATH = REPO_ROOT / "sql" / "migrations" / "phase3_vendor_reconciliation_silver.sql"
+MONOLITH_SQL_PATH = REPO_ROOT / "sql" / "ddl" / "create_silver_gold_views.sql"
 
 
 def _load_module(module_name: str, relative_path: str):
@@ -226,8 +233,12 @@ def test_silver_bank_sql_uses_explicit_direction_and_deterministic_deduplication
 
     assert "CREATE OR REPLACE VIEW `finance_silver.fact_bank_transactions`" in sql
     assert "WHERE raw.entity_name = 'bank_transactions'" in sql
-    assert "PARTITION BY source_org_id, transaction_id" in sql
-    assert "ORDER BY loaded_at DESC, run_id DESC, TO_HEX(SHA256(raw_json)) DESC" in sql
+    assert "PARTITION BY bank_transaction_leg_key" in sql
+    assert "ORDER BY loaded_at DESC, run_id DESC, raw_payload_hash DESC" in sql
+    assert "'leg|'" in sql
+    assert "bank_transaction_leg_key_fallback" in sql
+    assert "multi_leg_transaction" in sql
+    assert "conflicting_latest_snapshots" in sql
     assert "WHEN debit_or_credit = 'debit' THEN -ABS(transaction_amount)" in sql
     assert "WHEN debit_or_credit = 'credit' THEN ABS(transaction_amount)" in sql
     assert "ELSE CAST(NULL AS NUMERIC)" in sql
@@ -238,8 +249,143 @@ def test_silver_bank_sql_uses_explicit_direction_and_deterministic_deduplication
     assert "Missing or unsupported debit_or_credit" in sql
 
 
+def test_same_transaction_preserves_debit_and_credit_account_legs():
+    debit_key, debit_fallback = build_bank_transaction_leg_key(
+        {
+            "transaction_id": "transfer-1",
+            "account_id": "account-a",
+            "debit_or_credit": "debit",
+        },
+        "india-org",
+    )
+    credit_key, credit_fallback = build_bank_transaction_leg_key(
+        {
+            "transaction_id": "transfer-1",
+            "account_id": "account-b",
+            "debit_or_credit": "credit",
+        },
+        "india-org",
+    )
+
+    assert debit_key != credit_key
+    assert debit_fallback is False
+    assert credit_fallback is False
+
+
+def test_same_transaction_across_accounts_has_distinct_leg_keys():
+    first_key, _ = build_bank_transaction_leg_key(
+        {"transaction_id": "transaction-1", "account_id": "account-a", "debit_or_credit": "debit"},
+        "india-org",
+    )
+    second_key, _ = build_bank_transaction_leg_key(
+        {"transaction_id": "transaction-1", "account_id": "account-b", "debit_or_credit": "debit"},
+        "india-org",
+    )
+
+    assert first_key != second_key
+
+
+def test_repeated_snapshot_and_mutable_fields_do_not_create_new_leg():
+    original_key, _ = build_bank_transaction_leg_key(
+        {
+            "transaction_id": "transaction-1",
+            "account_id": "account-a",
+            "debit_or_credit": "credit",
+            "description": "Earlier description",
+            "status": "uncategorized",
+            "transaction_type": "transfer",
+        },
+        "india-org",
+    )
+    changed_key, _ = build_bank_transaction_leg_key(
+        {
+            "transaction_id": "transaction-1",
+            "account_id": "account-a",
+            "debit_or_credit": "credit",
+            "description": "Updated description",
+            "status": "categorized",
+            "transaction_type": "different-type",
+        },
+        "india-org",
+    )
+
+    assert original_key == changed_key
+
+
+def test_missing_account_uses_explicit_fallback_and_is_not_silently_merged():
+    first_key, first_fallback = build_bank_transaction_leg_key(
+        {"transaction_id": "transaction-1", "debit_or_credit": "debit", "amount": 10},
+        "india-org",
+    )
+    second_key, second_fallback = build_bank_transaction_leg_key(
+        {"transaction_id": "transaction-1", "debit_or_credit": "debit", "amount": 20},
+        "india-org",
+    )
+
+    assert first_fallback is True
+    assert second_fallback is True
+    assert first_key != second_key
+    assert "WHEN account_id IS NULL OR account_id = '' THEN 'Needs Review'" in SILVER_SQL_PATH.read_text(
+        encoding="utf-8"
+    )
+
+
+def test_duplicate_leg_detection_and_organization_isolation():
+    record = {
+        "transaction_id": "transaction-1",
+        "account_id": "account-a",
+        "debit_or_credit": "credit",
+    }
+    india_key, _ = build_bank_transaction_leg_key(record, "india-org")
+    india_repeat_key, _ = build_bank_transaction_leg_key(record, "india-org")
+    us_key, _ = build_bank_transaction_leg_key(record, "us-org")
+    counts = Counter([india_key, india_repeat_key, us_key])
+
+    assert india_key == india_repeat_key
+    assert india_key != us_key
+    assert sum(count - 1 for count in counts.values()) == 1
+    assert "COUNT(DISTINCT bank_transaction_leg_key)" in VALIDATION_QUERIES["bank_transactions"]
+    assert "duplicate_leg_keys" in VALIDATION_QUERIES["bank_transactions"]
+
+
+def test_bank_silver_validation_checks_counts_directions_and_totals():
+    query = VALIDATION_QUERIES["bank_transactions"]
+
+    assert "COUNTIF(debit_or_credit = 'debit')" in query
+    assert "COUNTIF(debit_or_credit = 'credit')" in query
+    assert "SUM(IF(debit_or_credit = 'debit', ABS(transaction_amount), 0))" in query
+    assert "SUM(IF(debit_or_credit = 'credit', ABS(transaction_amount), 0))" in query
+    assert "multi_leg_transaction_ids" in query
+    assert "conflicting_latest_leg_snapshots" in query
+
+
+def test_expected_india_and_us_silver_counts_and_totals():
+    rows = [
+        {
+            "org_key": "india",
+            "transaction_count": 499,
+            "debit_count": 91,
+            "credit_count": 408,
+            "unknown_direction_count": 0,
+            "total_debit": Decimal("199697358.54"),
+            "total_credit": Decimal("170181659.34"),
+        },
+        {
+            "org_key": "us",
+            "transaction_count": 96,
+            "debit_count": 20,
+            "credit_count": 76,
+            "unknown_direction_count": 0,
+            "total_debit": Decimal("776897.95"),
+            "total_credit": Decimal("658747.56"),
+        },
+    ]
+
+    assert compare_expected_bank_silver_metrics(rows) == []
+
+
 def test_legacy_transactions_remain_backward_compatibility_only():
-    sql = SILVER_SQL_PATH.read_text(encoding="utf-8")
+    sql = MONOLITH_SQL_PATH.read_text(encoding="utf-8")
 
     assert "CREATE OR REPLACE VIEW `finance_silver.fact_transactions`" in sql
     assert 'Historical Cloud Function runs labelled' in sql

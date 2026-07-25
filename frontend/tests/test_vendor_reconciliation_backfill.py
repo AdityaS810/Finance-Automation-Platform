@@ -133,7 +133,15 @@ def test_silver_migration_is_scoped_and_rerun_safe():
     assert all("CREATE OR REPLACE VIEW" in sql for _, sql in statements)
     assert "ROW_NUMBER() OVER" in statements[0][1]
     assert "PARTITION BY source_org_id, payment_id" in statements[0][1]
-    assert "PARTITION BY source_org_id, transaction_id" in statements[2][1]
+    assert "PARTITION BY bank_transaction_leg_key" in statements[2][1]
+
+
+def test_phase_35_can_select_only_bank_view_without_writing():
+    selected = silver_migration.apply_migration(
+        selected_view="finance_silver.fact_bank_transactions",
+    )
+
+    assert selected == ["finance_silver.fact_bank_transactions"]
 
 
 def test_allocation_cross_source_validation():
