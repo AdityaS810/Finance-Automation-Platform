@@ -12,6 +12,7 @@ from backend.zoho.extract_zoho import (
     fetch_expenses,
     fetch_invoices,
     fetch_journals,
+    fetch_vendor_payments,
 )
 
 from backend.gcp.gcs_loader import upload_json_to_gcs
@@ -96,6 +97,12 @@ def get_entity_configs() -> list[dict]:
         {
             "name": "customer_payments",
             "fetch_func": fetch_customer_payments,
+            "bq_table": CANONICAL_RAW_TABLE_ID,
+            "id_field": "payment_id",
+        },
+        {
+            "name": "vendor_payments",
+            "fetch_func": fetch_vendor_payments,
             "bq_table": CANONICAL_RAW_TABLE_ID,
             "id_field": "payment_id",
         },
