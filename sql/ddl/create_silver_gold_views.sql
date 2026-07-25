@@ -707,7 +707,8 @@ WITH parsed AS (
     ) AS transaction_amount,
     raw_json,
     loaded_at
-  -- Canonical transaction source. zoho_transactions_raw is legacy-only.
+  -- Backward compatibility only. Historical Cloud Function runs labelled
+  -- journal payloads as "transactions"; this is not a canonical bank source.
   FROM `finance_bronze.zoho_raw`
   WHERE entity_name = 'transactions'
 )
@@ -723,6 +724,99 @@ QUALIFY ROW_NUMBER() OVER (
   PARTITION BY COALESCE(source_org_id, 'legacy'), source_record_id
   ORDER BY loaded_at DESC
 ) = 1;
+
+
+CREATE OR REPLACE VIEW `finance_silver.fact_bank_transactions` AS
+WITH raw_parsed AS (
+  SELECT
+    raw.run_id,
+    COALESCE(raw.source_org_key, 'legacy') AS source_org_key,
+    raw.source_org_id,
+    raw.source_org_name,
+    raw.source_country,
+    raw.source_currency,
+    raw.source_record_id,
+    COALESCE(
+      NULLIF(raw.source_record_id, ''),
+      NULLIF(JSON_VALUE(raw.raw_json, '$.transaction_id'), '')
+    ) AS transaction_id,
+    raw.raw_json,
+    raw.loaded_at
+  FROM `finance_bronze.zoho_raw` raw
+  WHERE raw.entity_name = 'bank_transactions'
+),
+latest AS (
+  SELECT
+    *
+  FROM raw_parsed
+  QUALIFY ROW_NUMBER() OVER (
+    PARTITION BY source_org_id, transaction_id
+    ORDER BY loaded_at DESC, run_id DESC, TO_HEX(SHA256(raw_json)) DESC
+  ) = 1
+),
+parsed AS (
+  SELECT
+    run_id,
+    source_org_key,
+    source_org_id,
+    source_org_name,
+    source_country,
+    source_currency,
+    source_record_id,
+    transaction_id,
+    JSON_VALUE(raw_json, '$.account_id') AS account_id,
+    JSON_VALUE(raw_json, '$.account_name') AS account_name,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.date') AS DATE) AS transaction_date,
+    JSON_VALUE(raw_json, '$.transaction_type') AS transaction_type,
+    JSON_VALUE(raw_json, '$.reference_number') AS reference_number,
+    JSON_VALUE(raw_json, '$.description') AS description,
+    JSON_VALUE(raw_json, '$.status') AS status,
+    LOWER(JSON_VALUE(raw_json, '$.debit_or_credit')) AS debit_or_credit,
+    COALESCE(JSON_VALUE(raw_json, '$.currency_code'), source_currency, 'INR') AS original_currency,
+    SAFE_CAST(JSON_VALUE(raw_json, '$.amount') AS NUMERIC) AS transaction_amount,
+    loaded_at,
+    raw_json
+  FROM latest
+),
+quality AS (
+  SELECT
+    parsed.*,
+    CASE
+      WHEN debit_or_credit = 'debit' THEN -ABS(transaction_amount)
+      WHEN debit_or_credit = 'credit' THEN ABS(transaction_amount)
+      ELSE CAST(NULL AS NUMERIC)
+    END AS signed_amount,
+    CASE
+      WHEN debit_or_credit = 'debit' THEN 'Outgoing'
+      WHEN debit_or_credit = 'credit' THEN 'Incoming'
+      ELSE 'Unknown'
+    END AS transaction_direction,
+    CASE
+      WHEN transaction_id IS NULL THEN 'Invalid'
+      WHEN account_id IS NULL OR account_id = '' THEN 'Needs Review'
+      WHEN transaction_date IS NULL THEN 'Needs Review'
+      WHEN transaction_amount IS NULL THEN 'Needs Review'
+      WHEN debit_or_credit NOT IN ('debit', 'credit') OR debit_or_credit IS NULL THEN 'Needs Review'
+      ELSE 'Valid'
+    END AS bank_data_quality_status,
+    CASE
+      WHEN transaction_id IS NULL THEN 'Missing transaction_id'
+      WHEN account_id IS NULL OR account_id = '' THEN 'Missing account_id'
+      WHEN transaction_date IS NULL THEN 'Missing or invalid transaction date'
+      WHEN transaction_amount IS NULL THEN 'Missing or invalid amount'
+      WHEN debit_or_credit NOT IN ('debit', 'credit') OR debit_or_credit IS NULL
+        THEN 'Missing or unsupported debit_or_credit'
+      ELSE CAST(NULL AS STRING)
+    END AS bank_data_quality_reason
+  FROM parsed
+)
+SELECT
+  quality.*,
+  transaction_amount * COALESCE(fx.inr_rate, 1) AS transaction_amount_inr,
+  signed_amount * COALESCE(fx.inr_rate, 1) AS signed_amount_inr
+FROM quality
+LEFT JOIN `finance_silver.fx_rates_demo` fx
+  ON fx.currency_code = quality.original_currency;
 
 
 CREATE OR REPLACE VIEW `finance_silver.fact_customer_payments` AS

@@ -87,6 +87,7 @@ finance_silver.dim_accounts
 finance_silver.dim_contacts
 finance_silver.fact_invoices
 finance_silver.fact_transactions
+finance_silver.fact_bank_transactions
 finance_silver.fact_bank_statement_lines
 finance_silver.fact_gstr_lines
 
@@ -201,7 +202,7 @@ Data moves through Raw, Enrich, and Consume layers.
 
 Raw Layer = source/raw ingested data. Zoho Books records land in `finance_bronze.zoho_raw` with the full `raw_json` payload, run metadata, and load timestamps. Raw stores all raw versions from every sync run.
 
-`finance_bronze.zoho_raw` is the canonical Bronze source for transactions and all production Enrich/Consume views. The older `finance_bronze.zoho_transactions_raw` table is retained only for historical compatibility; new transaction syncs write to `zoho_raw` with `entity_name = 'transactions'`.
+`finance_bronze.zoho_raw` is the canonical Bronze source for Zoho entities and production Enrich/Consume views. New bank transactions write to `zoho_raw` with `entity_name = 'bank_transactions'`, and new journals use `entity_name = 'journals'`. The older `finance_bronze.zoho_transactions_raw` table and `finance_silver.fact_transactions` view remain for audit compatibility because historical Cloud Function runs labelled journal payloads as `transactions`; they are not canonical bank sources.
 
 Enrich Layer = cleaned/transformed/standardized data. Latest views in `finance_silver` read from Raw, filter by `entity_name`, extract typed fields, and keep the current record per `source_record_id`. Enrich history views keep every typed version with `version_number` and `is_current` for audit and change tracking.
 

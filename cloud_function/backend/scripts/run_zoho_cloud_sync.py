@@ -7,6 +7,7 @@ from google.cloud import bigquery
 
 from backend.zoho.extract_zoho import (
     fetch_accounts,
+    fetch_bank_transactions,
     fetch_contacts,
     fetch_customer_payments,
     fetch_expenses,
@@ -24,8 +25,8 @@ load_dotenv()
 SOURCE_SYSTEM = "zoho_books"
 BRONZE_DATASET_ID = "finance_bronze"
 CANONICAL_RAW_TABLE_ID = "zoho_raw"
-# Retained in BigQuery for historical compatibility only. New transaction
-# extracts use CANONICAL_RAW_TABLE_ID because fact_transactions reads zoho_raw.
+# Retained in BigQuery for historical compatibility only. Historical rows
+# labelled "transactions" may contain journals; new journals use "journals".
 LEGACY_TRANSACTION_RAW_TABLE_ID = "zoho_transactions_raw"
 ETL_RUNS_TABLE_ID = "etl_runs"
 PERIOD_TRACKING_MESSAGE = (
@@ -107,7 +108,13 @@ def get_entity_configs() -> list[dict]:
             "id_field": "payment_id",
         },
         {
-            "name": "transactions",
+            "name": "bank_transactions",
+            "fetch_func": fetch_bank_transactions,
+            "bq_table": CANONICAL_RAW_TABLE_ID,
+            "id_field": "transaction_id",
+        },
+        {
+            "name": "journals",
             "fetch_func": fetch_journals,
             "bq_table": CANONICAL_RAW_TABLE_ID,
             "id_field": "journal_id",

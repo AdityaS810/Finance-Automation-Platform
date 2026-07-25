@@ -1,4 +1,4 @@
-"""Regression tests for canonical transaction routing into generic Bronze."""
+"""Regression tests for journal routing and legacy transaction compatibility."""
 
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ cloud_loader = _load_module(
 )
 
 
-def test_local_transactions_use_generic_bronze_loader_with_org_metadata(monkeypatch):
+def test_local_journals_use_generic_bronze_loader_with_org_metadata(monkeypatch):
     captured = {}
 
     def fake_loader(**kwargs):
@@ -39,7 +39,7 @@ def test_local_transactions_use_generic_bronze_loader_with_org_metadata(monkeypa
         return len(kwargs["records"])
 
     monkeypatch.setattr(local_sync, "load_raw_records_to_bigquery", fake_loader)
-    entity = SimpleNamespace(name="transactions", id_field="journal_id")
+    entity = SimpleNamespace(name="journals", id_field="journal_id")
     organization = {
         "org_key": "india",
         "organization_id": "org-1",
@@ -53,13 +53,13 @@ def test_local_transactions_use_generic_bronze_loader_with_org_metadata(monkeypa
         entity=entity,
         records=[{"journal_id": "txn-1"}],
         run_id="run-1",
-        gcs_uri="gs://bucket/transactions.json",
+        gcs_uri="gs://bucket/journals.json",
         organization=organization,
     )
 
     assert rows_loaded == 1
     assert captured["table_id"] == "zoho_raw"
-    assert captured["entity_name"] == "transactions"
+    assert captured["entity_name"] == "journals"
     assert captured["source_org_key"] == "india"
     assert captured["source_org_id"] == "org-1"
     assert captured["source_org_name"] == "India Organization"
@@ -67,7 +67,7 @@ def test_local_transactions_use_generic_bronze_loader_with_org_metadata(monkeypa
     assert captured["source_currency"] == "INR"
 
 
-def test_cloud_transactions_route_to_canonical_generic_bronze(monkeypatch):
+def test_cloud_journals_route_to_canonical_generic_bronze(monkeypatch):
     captured = {}
 
     def fake_loader(**kwargs):
@@ -75,8 +75,8 @@ def test_cloud_transactions_route_to_canonical_generic_bronze(monkeypatch):
         return len(kwargs["records"])
 
     monkeypatch.setattr(cloud_sync, "load_raw_records_to_bigquery", fake_loader)
-    transaction_entity = next(
-        entity for entity in cloud_sync.get_entity_configs() if entity["name"] == "transactions"
+    journal_entity = next(
+        entity for entity in cloud_sync.get_entity_configs() if entity["name"] == "journals"
     )
     metadata = {
         "source_org_key": "india",
@@ -88,18 +88,18 @@ def test_cloud_transactions_route_to_canonical_generic_bronze(monkeypatch):
 
     rows_loaded = cloud_sync.load_entity_records_to_bronze(
         project_id="project-1",
-        entity=transaction_entity,
+        entity=journal_entity,
         records=[{"journal_id": "txn-1"}],
         run_id="run-1",
-        gcs_uri="gs://bucket/transactions.json",
+        gcs_uri="gs://bucket/journals.json",
         organization_metadata=metadata,
     )
 
     assert rows_loaded == 1
-    assert transaction_entity["bq_table"] == "zoho_raw"
+    assert journal_entity["bq_table"] == "zoho_raw"
     assert captured["table_id"] == "zoho_raw"
-    assert captured["entity_name"] == "transactions"
-    assert captured["gcs_uri"] == "gs://bucket/transactions.json"
+    assert captured["entity_name"] == "journals"
+    assert captured["gcs_uri"] == "gs://bucket/journals.json"
     for key, value in metadata.items():
         assert captured[key] == value
 

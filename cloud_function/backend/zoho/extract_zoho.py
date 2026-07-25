@@ -115,5 +115,14 @@ def fetch_vendor_payments() -> list[dict]:
     return detailed_payments
 
 
+def fetch_bank_transactions() -> list[dict]:
+    """Fetch complete bank transaction list records from every page."""
+    return fetch_paginated(
+        "banktransactions",
+        "banktransactions",
+        require_response_key=True,
+    )
+
+
 def fetch_journals() -> list[dict]:
     return fetch_paginated("journals", "journals")

@@ -55,6 +55,8 @@ def fetch_entity_records(entity_config: ZohoEntityConfig, organization_id: str |
         return fetch_expenses(organization_id=organization_id)
     if entity_config.name == "vendor_payments":
         return fetch_vendor_payments(organization_id=organization_id)
+    if entity_config.name == "bank_transactions":
+        return fetch_bank_transactions(organization_id=organization_id)
 
     return fetch_paginated(entity_config.endpoint, entity_config.response_key, organization_id=organization_id)
 
@@ -149,6 +151,16 @@ def fetch_vendor_payments(organization_id: str | None = None) -> list[dict]:
         detailed_payments.append(detailed_payment)
 
     return detailed_payments
+
+
+def fetch_bank_transactions(organization_id: str | None = None) -> list[dict]:
+    """Fetch complete bank transaction list records from every page."""
+    return fetch_paginated(
+        "banktransactions",
+        "banktransactions",
+        organization_id=organization_id,
+        require_response_key=True,
+    )
 
 
 def fetch_journals(organization_id: str | None = None) -> list[dict]:

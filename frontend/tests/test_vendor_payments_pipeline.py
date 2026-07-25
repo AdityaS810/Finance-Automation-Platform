@@ -234,7 +234,8 @@ def test_cloud_function_routes_vendor_payments_to_canonical_raw(monkeypatch):
     assert vendor_payment_entity["id_field"] == "payment_id"
     assert captured["entity_name"] == "vendor_payments"
     assert captured["source_org_key"] == "india"
-    assert entities["transactions"]["fetch_func"].__name__ == "fetch_journals"
+    assert entities["journals"]["fetch_func"].__name__ == "fetch_journals"
+    assert "transactions" not in entities
     assert vendor_payment_entity["fetch_func"].__name__ == "fetch_vendor_payments"
 
 

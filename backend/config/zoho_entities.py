@@ -63,6 +63,12 @@ ZOHO_ENTITY_CONFIGS: dict[str, ZohoEntityConfig] = {
         response_key="vendorpayments",
         id_field="payment_id",
     ),
+    "bank_transactions": ZohoEntityConfig(
+        name="bank_transactions",
+        endpoint="banktransactions",
+        response_key="banktransactions",
+        id_field="transaction_id",
+    ),
     "journals": ZohoEntityConfig(
         name="journals",
         endpoint="journals",
@@ -80,6 +86,7 @@ DEFAULT_ZOHO_ENTITY_NAMES = [
     "expenses",
     "customer_payments",
     "vendor_payments",
+    "bank_transactions",
     "journals",
 ]
 
