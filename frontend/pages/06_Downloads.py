@@ -9,7 +9,6 @@ import pandas as pd
 import streamlit as st
 
 from backend.reports.vendor_transactions_report import (
-    PAYMENT_AVAILABILITY_NOTE,
     fetch_vendor_filter_options,
     generate_vendor_transactions_report,
     safe_exception_details,
@@ -32,10 +31,10 @@ repo_root = Path(__file__).resolve().parents[2]
 
 EXPORT_GROUPS = [
     {
-        "title": "Vendor Payments & Transactions",
-        "label": "Vendor Payments & Transactions Report",
-        "empty": "No vendor reports are available yet.",
-        "keywords": ["vendor_payments_transactions"],
+        "title": "Vendor Reconciliation",
+        "label": "Vendor Reconciliation Report",
+        "empty": "No vendor reconciliation reports are available yet.",
+        "keywords": ["vendor_reconciliation"],
     },
     {
         "title": "MIS Reports",
@@ -98,8 +97,8 @@ def _group_key(file_item: dict) -> str:
     """Classify an output file into a user-facing report group."""
     file_name = file_item["file_name"].lower()
 
-    if "vendor_payments_transactions" in file_name:
-        return "Vendor Payments & Transactions"
+    if "vendor_reconciliation" in file_name:
+        return "Vendor Reconciliation"
     if "mis" in file_name:
         return "MIS Reports"
     if "bank_reconciliation" in file_name or "bank reconciliation" in file_name:
@@ -173,19 +172,25 @@ def _vendor_filter_options() -> dict[str, list[str]]:
 
 
 section_card(
-    "Vendor Payments & Transactions",
+    "Vendor Reconciliation Report",
     body_html=(
-        "<p>Generate an Excel workbook with vendor bills, available vendor/contact transaction fields, "
-        "and a clear data-availability statement.</p>"
+        "<p>Generate a validated workbook from verified vendor-payment, bill, allocation, "
+        "bank-transaction, and reconciliation views.</p>"
     ),
 )
-st.caption(PAYMENT_AVAILABILITY_NOTE)
 
 try:
     vendor_options = _vendor_filter_options()
     filter_options_error = False
 except Exception:
-    vendor_options = {"organizations": [], "vendors": [], "statuses": []}
+    vendor_options = {
+        "organizations": [],
+        "vendors": [],
+        "currencies": [],
+        "source_bill_statuses": [],
+        "reconciliation_statuses": [],
+        "bank_match_statuses": [],
+    }
     filter_options_error = True
 
 today = date.today()
@@ -219,12 +224,48 @@ with filter_row_two[1]:
         key="vendor_report_vendor",
     )
 with filter_row_two[2]:
-    selected_status = st.selectbox(
-        "Status",
-        options=[None, *vendor_options["statuses"]],
-        format_func=lambda value: value or "All Statuses",
-        key="vendor_report_status",
+    selected_currency = st.selectbox(
+        "Currency",
+        options=[None, *vendor_options["currencies"]],
+        format_func=lambda value: value or "All Currencies",
+        key="vendor_report_currency",
     )
+
+filter_row_three = st.columns(3)
+with filter_row_three[0]:
+    selected_source_bill_status = st.selectbox(
+        "Source Bill Status",
+        options=[None, *vendor_options["source_bill_statuses"]],
+        format_func=lambda value: value or "All Source Statuses",
+        key="vendor_report_source_bill_status",
+    )
+with filter_row_three[1]:
+    selected_reconciliation_status = st.selectbox(
+        "Reconciliation Status",
+        options=[None, *vendor_options["reconciliation_statuses"]],
+        format_func=lambda value: value or "All Reconciliation Statuses",
+        key="vendor_report_reconciliation_status",
+    )
+with filter_row_three[2]:
+    selected_bank_match_status = st.selectbox(
+        "Bank Match Status",
+        options=[None, *vendor_options["bank_match_statuses"]],
+        format_func=lambda value: value or "All Bank Match Statuses",
+        key="vendor_report_bank_match_status",
+    )
+
+selected_review_required = st.selectbox(
+    "Review Required",
+    options=[None, True, False],
+    format_func=lambda value: (
+        "All Review States"
+        if value is None
+        else "Yes"
+        if value
+        else "No"
+    ),
+    key="vendor_report_review_required",
+)
 
 if filter_options_error:
     st.caption(
@@ -232,7 +273,11 @@ if filter_options_error:
         "after BigQuery credentials are available."
     )
 
-if st.button("Generate Report", type="primary", key="generate_vendor_report"):
+if st.button(
+    "Prepare Vendor Reconciliation Excel",
+    type="primary",
+    key="generate_vendor_reconciliation_report",
+):
     if vendor_start_date > vendor_end_date:
         st.session_state["vendor_report_error"] = "Start date must be on or before end date."
         st.session_state.pop("vendor_report_result", None)
@@ -245,7 +290,11 @@ if st.button("Generate Report", type="primary", key="generate_vendor_report"):
                     end_date=vendor_end_date,
                     organization=selected_organization,
                     vendor=selected_vendor,
-                    status=selected_status,
+                    currency=selected_currency,
+                    source_bill_status=selected_source_bill_status,
+                    reconciliation_status=selected_reconciliation_status,
+                    bank_match_status=selected_bank_match_status,
+                    review_required=selected_review_required,
                     client=get_bigquery_client(),
                 )
             st.session_state["vendor_report_result"] = result
@@ -265,22 +314,48 @@ if vendor_report_error:
         with st.expander("Technical details", expanded=False):
             st.code(vendor_report_error_details, language="text")
 elif vendor_report_result:
-    count_columns = st.columns(3)
-    count_columns[0].metric("Vendor bills", f"{vendor_report_result['bill_rows']:,}")
-    count_columns[1].metric("Vendor transactions", f"{vendor_report_result['transaction_rows']:,}")
-    count_columns[2].metric("Total rows", f"{vendor_report_result['total_rows']:,}")
+    summary = vendor_report_result["summary"]
+    reconciliation_counts = summary["reconciliation_counts"]
+    count_columns = st.columns(6)
+    count_columns[0].metric("Bills", f"{summary['total_bills']:,}")
+    count_columns[1].metric("Vendor Payments", f"{summary['total_vendor_payments']:,}")
+    count_columns[2].metric(
+        "Fully Reconciled",
+        f"{reconciliation_counts.get('Fully Reconciled', 0):,}",
+    )
+    count_columns[3].metric(
+        "Bank Pending",
+        f"{reconciliation_counts.get('Payment Recorded - Bank Pending', 0):,}",
+    )
+    count_columns[4].metric(
+        "Unpaid",
+        f"{reconciliation_counts.get('Unpaid - No Payment Found', 0):,}",
+    )
+    count_columns[5].metric(
+        "Needs Review",
+        f"{reconciliation_counts.get('Needs Review', 0):,}",
+    )
+
+    if (
+        selected_vendor
+        and summary["total_bills"] == 0
+        and summary["total_vendor_payments"] == 0
+    ):
+        st.info(
+            "No bills or vendor payments were found for this vendor in the selected period."
+        )
 
     if vendor_report_result["total_rows"] == 0:
         st.info(
-            "No vendor bills or transactions matched the selected filters. The downloaded workbook "
-            "still includes headers and data-availability notes."
+            "No vendor reconciliation records matched the selected filters. "
+            "The workbook still contains all required sheets and headers."
         )
     else:
         st.success(vendor_report_result["message"])
 
     report_name = vendor_report_result["report_name"]
     st.download_button(
-        "Download Excel",
+        "Download Vendor Reconciliation Excel",
         data=vendor_report_result["report_bytes"],
         file_name=report_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -288,7 +363,9 @@ elif vendor_report_result:
         use_container_width=True,
     )
 else:
-    st.info("Choose filters and generate the report. Empty selections include all available organizations, vendors, or statuses.")
+    st.info(
+        "Choose filters and prepare the workbook. Empty selections include all available values."
+    )
 
 
 all_files = _collect_output_files()
