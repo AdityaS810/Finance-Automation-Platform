@@ -9,6 +9,10 @@ import pandas as pd
 import streamlit as st
 
 from backend.reports.vendor_transactions_report import (
+    ANALYSIS_DISCLAIMER,
+    REPORT_MODE_ANALYSIS,
+    REPORT_MODE_INPUT,
+    REPORT_MODES,
     fetch_vendor_filter_options,
     generate_vendor_transactions_report,
     safe_exception_details,
@@ -172,12 +176,30 @@ def _vendor_filter_options() -> dict[str, list[str]]:
 
 
 section_card(
-    "Vendor Reconciliation Report",
+    "Vendor Downloads",
     body_html=(
-        "<p>Generate a validated workbook from verified vendor-payment, bill, allocation, "
-        "bank-transaction, and reconciliation views.</p>"
+        "<p>Prepare complete, structured source data for finance-led reconciliation, "
+        "or optionally generate system-assisted analysis.</p>"
     ),
 )
+
+selected_report_mode = st.selectbox(
+    "Report mode",
+    options=REPORT_MODES,
+    index=0,
+    key="vendor_report_mode",
+)
+if selected_report_mode == REPORT_MODE_INPUT:
+    st.caption(
+        "Download structured Zoho bills, vendor-payment batches, bill allocations, "
+        "and bank transactions for manual reconciliation."
+    )
+else:
+    st.caption(
+        "Generate system-assisted matching and status suggestions. Finance review is "
+        "required before accepting any result."
+    )
+    st.warning(ANALYSIS_DISCLAIMER)
 
 try:
     vendor_options = _vendor_filter_options()
@@ -231,41 +253,38 @@ with filter_row_two[2]:
         key="vendor_report_currency",
     )
 
-filter_row_three = st.columns(3)
-with filter_row_three[0]:
-    selected_source_bill_status = st.selectbox(
-        "Source Bill Status",
-        options=[None, *vendor_options["source_bill_statuses"]],
-        format_func=lambda value: value or "All Source Statuses",
-        key="vendor_report_source_bill_status",
-    )
-with filter_row_three[1]:
-    selected_reconciliation_status = st.selectbox(
-        "Reconciliation Status",
-        options=[None, *vendor_options["reconciliation_statuses"]],
-        format_func=lambda value: value or "All Reconciliation Statuses",
-        key="vendor_report_reconciliation_status",
-    )
-with filter_row_three[2]:
-    selected_bank_match_status = st.selectbox(
-        "Bank Match Status",
-        options=[None, *vendor_options["bank_match_statuses"]],
-        format_func=lambda value: value or "All Bank Match Statuses",
-        key="vendor_report_bank_match_status",
-    )
-
-selected_review_required = st.selectbox(
-    "Review Required",
-    options=[None, True, False],
-    format_func=lambda value: (
-        "All Review States"
-        if value is None
-        else "Yes"
-        if value
-        else "No"
-    ),
-    key="vendor_report_review_required",
-)
+selected_reconciliation_status = None
+selected_bank_match_status = None
+selected_review_required = None
+if selected_report_mode == REPORT_MODE_ANALYSIS:
+    filter_row_three = st.columns(3)
+    with filter_row_three[0]:
+        selected_reconciliation_status = st.selectbox(
+            "Reconciliation Status",
+            options=[None, *vendor_options["reconciliation_statuses"]],
+            format_func=lambda value: value or "All Reconciliation Statuses",
+            key="vendor_report_reconciliation_status",
+        )
+    with filter_row_three[1]:
+        selected_bank_match_status = st.selectbox(
+            "Bank Match Status",
+            options=[None, *vendor_options["bank_match_statuses"]],
+            format_func=lambda value: value or "All Bank Match Statuses",
+            key="vendor_report_bank_match_status",
+        )
+    with filter_row_three[2]:
+        selected_review_required = st.selectbox(
+            "Review Required",
+            options=[None, True, False],
+            format_func=lambda value: (
+                "All Review States"
+                if value is None
+                else "Yes"
+                if value
+                else "No"
+            ),
+            key="vendor_report_review_required",
+        )
 
 if filter_options_error:
     st.caption(
@@ -273,8 +292,13 @@ if filter_options_error:
         "after BigQuery credentials are available."
     )
 
+prepare_button_text = (
+    "Prepare Reconciliation Input Data"
+    if selected_report_mode == REPORT_MODE_INPUT
+    else "Prepare Automated Reconciliation Analysis"
+)
 if st.button(
-    "Prepare Vendor Reconciliation Excel",
+    prepare_button_text,
     type="primary",
     key="generate_vendor_reconciliation_report",
 ):
@@ -291,10 +315,10 @@ if st.button(
                     organization=selected_organization,
                     vendor=selected_vendor,
                     currency=selected_currency,
-                    source_bill_status=selected_source_bill_status,
                     reconciliation_status=selected_reconciliation_status,
                     bank_match_status=selected_bank_match_status,
                     review_required=selected_review_required,
+                    report_mode=selected_report_mode,
                     client=get_bigquery_client(),
                 )
             st.session_state["vendor_report_result"] = result
@@ -308,6 +332,11 @@ if st.button(
 vendor_report_error = st.session_state.get("vendor_report_error")
 vendor_report_error_details = st.session_state.get("vendor_report_error_details")
 vendor_report_result = st.session_state.get("vendor_report_result")
+if (
+    vendor_report_result
+    and vendor_report_result.get("report_mode") != selected_report_mode
+):
+    vendor_report_result = None
 if vendor_report_error:
     st.error(vendor_report_error)
     if vendor_report_error_details:
@@ -315,31 +344,47 @@ if vendor_report_error:
             st.code(vendor_report_error_details, language="text")
 elif vendor_report_result:
     summary = vendor_report_result["summary"]
-    reconciliation_counts = summary["reconciliation_counts"]
-    count_columns = st.columns(6)
-    count_columns[0].metric("Bills", f"{summary['total_bills']:,}")
-    count_columns[1].metric("Vendor Payments", f"{summary['total_vendor_payments']:,}")
+    is_input_mode = vendor_report_result["report_mode"] == REPORT_MODE_INPUT
+    count_columns = st.columns(4 if is_input_mode else 5)
+    bill_count = (
+        summary["bill_record_count"] if is_input_mode else summary["total_bills"]
+    )
+    payment_count = (
+        summary["vendor_payment_count"]
+        if is_input_mode
+        else summary["total_vendor_payments"]
+    )
+    allocation_count = (
+        summary["payment_allocation_count"]
+        if is_input_mode
+        else summary["total_payment_allocations"]
+    )
+    bank_leg_count = (
+        summary["bank_transaction_leg_count"]
+        if is_input_mode
+        else summary["total_bank_transaction_legs"]
+    )
+    count_columns[0].metric("Bills", f"{bill_count:,}")
+    count_columns[1].metric("Vendor Payments", f"{payment_count:,}")
     count_columns[2].metric(
-        "Fully Reconciled",
-        f"{reconciliation_counts.get('Fully Reconciled', 0):,}",
+        "Payment Allocations",
+        f"{allocation_count:,}",
     )
     count_columns[3].metric(
-        "Bank Pending",
-        f"{reconciliation_counts.get('Payment Recorded - Bank Pending', 0):,}",
+        "Bank Transaction Legs",
+        f"{bank_leg_count:,}",
     )
-    count_columns[4].metric(
-        "Unpaid",
-        f"{reconciliation_counts.get('Unpaid - No Payment Found', 0):,}",
-    )
-    count_columns[5].metric(
-        "Needs Review",
-        f"{reconciliation_counts.get('Needs Review', 0):,}",
-    )
+    if not is_input_mode:
+        reconciliation_counts = summary["reconciliation_counts"]
+        count_columns[4].metric(
+            "Bank Pending",
+            f"{reconciliation_counts.get('Payment Recorded - Bank Pending', 0):,}",
+        )
 
     if (
         selected_vendor
-        and summary["total_bills"] == 0
-        and summary["total_vendor_payments"] == 0
+        and bill_count == 0
+        and payment_count == 0
     ):
         st.info(
             "No bills or vendor payments were found for this vendor in the selected period."
@@ -347,15 +392,20 @@ elif vendor_report_result:
 
     if vendor_report_result["total_rows"] == 0:
         st.info(
-            "No vendor reconciliation records matched the selected filters. "
-            "The workbook still contains all required sheets and headers."
+            "No vendor records matched the selected filters. The workbook still "
+            "contains the required sheets and headers."
         )
     else:
         st.success(vendor_report_result["message"])
 
     report_name = vendor_report_result["report_name"]
+    download_button_text = (
+        "Download Reconciliation Input Data"
+        if is_input_mode
+        else "Download Automated Reconciliation Analysis"
+    )
     st.download_button(
-        "Download Vendor Reconciliation Excel",
+        download_button_text,
         data=vendor_report_result["report_bytes"],
         file_name=report_name,
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",

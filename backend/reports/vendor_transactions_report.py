@@ -36,32 +36,104 @@ PAYMENT_MATCHES_VIEW = "finance_gold.vendor_payment_bank_matches"
 BILL_RECONCILIATION_VIEW = "finance_gold.vendor_bill_reconciliation"
 EXCEPTIONS_VIEW = "finance_gold.vendor_reconciliation_exceptions"
 
+REPORT_MODE_INPUT = "Reconciliation Input Data"
+REPORT_MODE_ANALYSIS = "Automated Reconciliation Analysis"
+REPORT_MODES = [REPORT_MODE_INPUT, REPORT_MODE_ANALYSIS]
+ANALYSIS_DISCLAIMER = (
+    "System-generated analysis. Finance review is required before accepting or "
+    "posting reconciliation results."
+)
+
 WORKBOOK_SHEETS = [
     "Summary",
-    "Vendor Master",
     "Vendor Bills",
     "Vendor Payments",
     "Payment Allocations",
     "Bank Transactions",
     "Reconciliation Results",
-    "Exceptions - Review",
-    "Technical Audit",
 ]
 
-VENDOR_MASTER_COLUMNS = [
+INPUT_WORKBOOK_SHEETS = [
+    "Summary",
+    "Vendor Bills",
+    "Zoho Payment Batch",
+    "Bank Transactions",
+]
+
+INPUT_VENDOR_BILL_COLUMNS = [
     "Organization",
     "Vendor ID",
     "Vendor Name",
-    "Company Name",
-    "Vendor Status",
+    "Bill ID",
+    "Bill Number",
+    "Bill Date",
+    "Due Date",
     "Currency",
-    "Outstanding Payable",
-    "Has Bills",
-    "Has Vendor Payments",
-    "Bill Count",
-    "Payment Count",
-    "Activity Status",
+    "Bill Amount",
+    "Outstanding Balance",
+    "Zoho Bill Status",
 ]
+
+INPUT_VENDOR_PAYMENT_COLUMNS = [
+    "Organization",
+    "Vendor ID",
+    "Vendor Name",
+    "Payment ID",
+    "Payment Number",
+    "Payment Date",
+    "Payment Reference",
+    "Payment Mode",
+    "Paid-Through Account Name",
+    "Currency",
+    "Total Payment Amount",
+    "Allocated Amount",
+    "Unapplied Amount",
+    "Allocation Status",
+]
+
+INPUT_PAYMENT_ALLOCATION_COLUMNS = [
+    "Organization",
+    "Payment ID",
+    "Bill Payment ID",
+    "Bill ID",
+    "Bill Number",
+    "Amount Applied",
+    "Allocation Key",
+]
+
+ZOHO_PAYMENT_BATCH_COLUMNS = [
+    *INPUT_VENDOR_PAYMENT_COLUMNS,
+    "Bill Payment ID",
+    "Bill ID",
+    "Bill Number",
+    "Amount Applied",
+]
+
+INPUT_BANK_TRANSACTION_COLUMNS = [
+    "Organization",
+    "Account Name",
+    "Transaction ID",
+    "Bank Transaction Leg Key",
+    "Transaction Date",
+    "Transaction Type",
+    "Reference Number",
+    "Description",
+    "Debit/Credit",
+    "Direction",
+    "Currency",
+    "Amount",
+    "Signed Amount",
+    "Status",
+    "Multi-Leg Transaction",
+    "Data Quality Status",
+]
+
+INPUT_DATASET_COLUMNS = {
+    "vendor_bills": INPUT_VENDOR_BILL_COLUMNS,
+    "vendor_payments": INPUT_VENDOR_PAYMENT_COLUMNS,
+    "payment_allocations": INPUT_PAYMENT_ALLOCATION_COLUMNS,
+    "bank_transactions": INPUT_BANK_TRANSACTION_COLUMNS,
+}
 
 VENDOR_BILL_COLUMNS = [
     "Organization",
@@ -82,6 +154,8 @@ VENDOR_BILL_COLUMNS = [
     "Reconciliation Status",
     "Reconciliation Reason",
     "Review Required",
+    "Source Record ID",
+    "Data Quality Status",
 ]
 
 VENDOR_PAYMENT_COLUMNS = [
@@ -105,6 +179,9 @@ VENDOR_PAYMENT_COLUMNS = [
     "Bank Transaction Date",
     "Bank Amount",
     "Review Required",
+    "Source Record ID",
+    "Bank Transaction Leg Key",
+    "Data Quality Status",
 ]
 
 PAYMENT_ALLOCATION_COLUMNS = [
@@ -119,6 +196,8 @@ PAYMENT_ALLOCATION_COLUMNS = [
     "Amount Applied",
     "Payment Date",
     "Allocation Key",
+    "Source Record ID",
+    "Data Quality Status",
 ]
 
 BANK_TRANSACTION_COLUMNS = [
@@ -134,9 +213,12 @@ BANK_TRANSACTION_COLUMNS = [
     "Signed Amount",
     "Status",
     "Multi-Leg Transaction",
-    "Bank Data Quality Status",
     "Used in Vendor Match",
     "Review Required",
+    "Source Record ID",
+    "Bank Transaction Leg Key",
+    "Match Method",
+    "Data Quality Status",
 ]
 
 RECONCILIATION_RESULT_COLUMNS = [
@@ -154,60 +236,32 @@ RECONCILIATION_RESULT_COLUMNS = [
     "Payment Count",
     "Payment IDs",
     "Latest Payment Date",
+    "Payment Amount",
     "Allocated Amount",
-    "Bank-Verified Amount",
-    "Bank-Pending Amount",
+    "Bank Transaction Date",
+    "Bank Amount",
+    "Bank Match Status",
+    "Bank Match Method",
+    "Bank Pending Amount",
     "Remaining Reconciliation Amount",
     "Reconciliation Status",
     "Reconciliation Reason",
-    "Review Required",
-]
-
-EXCEPTION_COLUMNS = [
     "Exception Type",
-    "Organization",
-    "Vendor ID",
-    "Vendor Name",
-    "Bill ID",
-    "Payment ID",
-    "Masked Bank Leg Key",
-    "Currency",
-    "Amount",
-    "Exception Reason",
     "Review Required",
     "Review Status",
     "Reviewer Comment",
 ]
 
-TECHNICAL_AUDIT_COLUMNS = [
-    "Record Type",
-    "Source Organization ID",
-    "Source Record ID",
-    "Bill ID",
-    "Payment ID",
-    "Allocation Key",
-    "Bank Transaction Leg Key",
-    "Run ID",
-    "Loaded Timestamp",
-    "Mapping/Match Method",
-    "Data Quality Status",
-]
-
 DATASET_COLUMNS = {
-    "vendor_master": VENDOR_MASTER_COLUMNS,
     "vendor_bills": VENDOR_BILL_COLUMNS,
     "vendor_payments": VENDOR_PAYMENT_COLUMNS,
     "payment_allocations": PAYMENT_ALLOCATION_COLUMNS,
     "bank_transactions": BANK_TRANSACTION_COLUMNS,
     "reconciliation_results": RECONCILIATION_RESULT_COLUMNS,
-    "exceptions": EXCEPTION_COLUMNS,
-    "technical_audit": TECHNICAL_AUDIT_COLUMNS,
 }
 
 INTERNAL_COLUMNS = {
-    "vendor_master": ["_Contact Type", "_Source Organization ID"],
-    "vendor_payments": ["_Bank Transaction Leg Key", "_Source Organization ID"],
-    "bank_transactions": ["_Bank Transaction Leg Key"],
+    "vendor_payments": ["_Source Organization ID"],
 }
 
 DATE_COLUMNS = {
@@ -223,17 +277,16 @@ AMOUNT_COLUMNS = {
     "Bill Amount",
     "Outstanding Balance",
     "Payment Amount",
+    "Total Payment Amount",
     "Allocated Amount",
     "Unapplied Amount",
-    "Bank-Verified Amount",
-    "Bank-Pending Amount",
+    "Bank Pending Amount",
     "Remaining Reconciliation Amount",
     "Amount Applied",
     "Amount",
     "Signed Amount",
     "Source Outstanding Balance",
     "Bank Amount",
-    "Outstanding Payable",
 }
 TEXT_IDENTIFIER_COLUMNS = {
     "Vendor ID",
@@ -245,39 +298,21 @@ TEXT_IDENTIFIER_COLUMNS = {
     "Allocation Key",
     "Transaction ID",
     "Reference Number",
+    "Payment Reference",
     "Source Organization ID",
     "Source Record ID",
     "Bank Transaction Leg Key",
-    "Masked Bank Leg Key",
     "Run ID",
     "Payment IDs",
 }
 WRAP_COLUMNS = {
     "Vendor Name",
-    "Company Name",
     "Reconciliation Reason",
     "Bank Match Reason",
-    "Exception Reason",
     "Reviewer Comment",
 }
 
 DISPLAY_COLUMN_MAPS = {
-    "vendor_master": {
-        "organization": "Organization",
-        "vendor_id": "Vendor ID",
-        "vendor_name": "Vendor Name",
-        "company_name": "Company Name",
-        "vendor_status": "Vendor Status",
-        "currency": "Currency",
-        "outstanding_payable": "Outstanding Payable",
-        "has_bills": "Has Bills",
-        "has_vendor_payments": "Has Vendor Payments",
-        "bill_count": "Bill Count",
-        "payment_count": "Payment Count",
-        "activity_status": "Activity Status",
-        "_contact_type": "_Contact Type",
-        "_source_org_id": "_Source Organization ID",
-    },
     "vendor_bills": {
         "organization": "Organization",
         "vendor_id": "Vendor ID",
@@ -297,6 +332,8 @@ DISPLAY_COLUMN_MAPS = {
         "reconciliation_status": "Reconciliation Status",
         "reconciliation_reason": "Reconciliation Reason",
         "review_required": "Review Required",
+        "source_record_id": "Source Record ID",
+        "data_quality_status": "Data Quality Status",
     },
     "vendor_payments": {
         "organization": "Organization",
@@ -319,7 +356,9 @@ DISPLAY_COLUMN_MAPS = {
         "bank_transaction_date": "Bank Transaction Date",
         "bank_amount": "Bank Amount",
         "review_required": "Review Required",
-        "_bank_transaction_leg_key": "_Bank Transaction Leg Key",
+        "source_record_id": "Source Record ID",
+        "bank_transaction_leg_key": "Bank Transaction Leg Key",
+        "data_quality_status": "Data Quality Status",
         "_source_org_id": "_Source Organization ID",
     },
     "payment_allocations": {
@@ -334,6 +373,8 @@ DISPLAY_COLUMN_MAPS = {
         "amount_applied": "Amount Applied",
         "payment_date": "Payment Date",
         "allocation_key": "Allocation Key",
+        "source_record_id": "Source Record ID",
+        "data_quality_status": "Data Quality Status",
     },
     "bank_transactions": {
         "organization": "Organization",
@@ -348,10 +389,12 @@ DISPLAY_COLUMN_MAPS = {
         "signed_amount": "Signed Amount",
         "status": "Status",
         "multi_leg_transaction": "Multi-Leg Transaction",
-        "bank_data_quality_status": "Bank Data Quality Status",
         "used_in_vendor_match": "Used in Vendor Match",
         "review_required": "Review Required",
-        "_bank_transaction_leg_key": "_Bank Transaction Leg Key",
+        "source_record_id": "Source Record ID",
+        "bank_transaction_leg_key": "Bank Transaction Leg Key",
+        "match_method": "Match Method",
+        "data_quality_status": "Data Quality Status",
     },
     "reconciliation_results": {
         "organization": "Organization",
@@ -368,40 +411,78 @@ DISPLAY_COLUMN_MAPS = {
         "payment_count": "Payment Count",
         "payment_ids": "Payment IDs",
         "latest_payment_date": "Latest Payment Date",
+        "payment_amount": "Payment Amount",
         "allocated_amount": "Allocated Amount",
-        "bank_verified_amount": "Bank-Verified Amount",
-        "bank_pending_amount": "Bank-Pending Amount",
+        "bank_transaction_date": "Bank Transaction Date",
+        "bank_amount": "Bank Amount",
+        "bank_match_status": "Bank Match Status",
+        "bank_match_method": "Bank Match Method",
+        "bank_pending_amount": "Bank Pending Amount",
         "remaining_reconciliation_amount": "Remaining Reconciliation Amount",
         "reconciliation_status": "Reconciliation Status",
         "reconciliation_reason": "Reconciliation Reason",
-        "review_required": "Review Required",
-    },
-    "exceptions": {
         "exception_type": "Exception Type",
-        "organization": "Organization",
-        "vendor_id": "Vendor ID",
-        "vendor_name": "Vendor Name",
-        "bill_id": "Bill ID",
-        "payment_id": "Payment ID",
-        "masked_bank_leg_key": "Masked Bank Leg Key",
-        "currency": "Currency",
-        "amount": "Amount",
-        "exception_reason": "Exception Reason",
         "review_required": "Review Required",
         "review_status": "Review Status",
         "reviewer_comment": "Reviewer Comment",
     },
-    "technical_audit": {
-        "record_type": "Record Type",
-        "source_org_id": "Source Organization ID",
-        "source_record_id": "Source Record ID",
+}
+
+INPUT_DISPLAY_COLUMN_MAPS = {
+    "vendor_bills": {
+        "organization": "Organization",
+        "vendor_id": "Vendor ID",
+        "vendor_name": "Vendor Name",
         "bill_id": "Bill ID",
+        "bill_number": "Bill Number",
+        "bill_date": "Bill Date",
+        "due_date": "Due Date",
+        "currency": "Currency",
+        "bill_amount": "Bill Amount",
+        "outstanding_balance": "Outstanding Balance",
+        "zoho_bill_status": "Zoho Bill Status",
+    },
+    "vendor_payments": {
+        "organization": "Organization",
+        "vendor_id": "Vendor ID",
+        "vendor_name": "Vendor Name",
         "payment_id": "Payment ID",
+        "payment_number": "Payment Number",
+        "payment_date": "Payment Date",
+        "payment_reference": "Payment Reference",
+        "payment_mode": "Payment Mode",
+        "paid_through_account_name": "Paid-Through Account Name",
+        "currency": "Currency",
+        "total_payment_amount": "Total Payment Amount",
+        "allocated_amount": "Allocated Amount",
+        "unapplied_amount": "Unapplied Amount",
+        "allocation_status": "Allocation Status",
+    },
+    "payment_allocations": {
+        "organization": "Organization",
+        "payment_id": "Payment ID",
+        "bill_payment_id": "Bill Payment ID",
+        "bill_id": "Bill ID",
+        "bill_number": "Bill Number",
+        "amount_applied": "Amount Applied",
         "allocation_key": "Allocation Key",
+    },
+    "bank_transactions": {
+        "organization": "Organization",
+        "account_name": "Account Name",
+        "transaction_id": "Transaction ID",
         "bank_transaction_leg_key": "Bank Transaction Leg Key",
-        "run_id": "Run ID",
-        "loaded_timestamp": "Loaded Timestamp",
-        "mapping_match_method": "Mapping/Match Method",
+        "transaction_date": "Transaction Date",
+        "transaction_type": "Transaction Type",
+        "reference_number": "Reference Number",
+        "description": "Description",
+        "debit_or_credit": "Debit/Credit",
+        "direction": "Direction",
+        "currency": "Currency",
+        "amount": "Amount",
+        "signed_amount": "Signed Amount",
+        "status": "Status",
+        "multi_leg_transaction": "Multi-Leg Transaction",
         "data_quality_status": "Data Quality Status",
     },
 }
@@ -493,51 +574,145 @@ def _where(filters: Mapping[str, Any], columns: Mapping[str, str]) -> str:
     return "WHERE " + " AND ".join(predicates) if predicates else ""
 
 
-def build_vendor_reconciliation_queries(
+def build_reconciliation_input_queries(
     project_id: str,
     filters: Mapping[str, Any],
 ) -> dict[str, str]:
-    """Build parameterized, source-scoped queries for every workbook dataset."""
-    vendor_master_filter = _where(
-        filters,
-        {
-            "organization": "contact.source_org_key",
-            "vendor": (
-                "COALESCE(NULLIF(contact.contact_name, ''), "
-                "NULLIF(contact.company_name, ''), contact.contact_id)"
-            ),
-            "currency": "contact.currency_code",
-        },
-    )
-    bill_activity_filter = _where(
+    """Build Silver-only queries for the manual-reconciliation input workbook."""
+    bills_filter = _where(
         filters,
         {
             "start_date": "bill.bill_date",
             "end_date": "bill.bill_date",
             "organization": "bill.source_org_key",
+            "vendor": "bill.vendor_name",
             "currency": "bill.original_currency",
         },
     )
-    payment_activity_filter = _where(
+    payments_filter = _where(
         filters,
         {
             "start_date": "payment.payment_date",
             "end_date": "payment.payment_date",
             "organization": "payment.source_org_key",
+            "vendor": "payment.vendor_name",
             "currency": "payment.currency_code",
         },
     )
+    allocations_filter = _where(
+        filters,
+        {
+            "start_date": "allocation.payment_date",
+            "end_date": "allocation.payment_date",
+            "organization": "allocation.source_org_key",
+            "vendor": "allocation.vendor_name",
+            "currency": "allocation.currency_code",
+        },
+    )
+    bank_filter = _where(
+        filters,
+        {
+            "start_date": "bank.transaction_date",
+            "end_date": "bank.transaction_date",
+            "organization": "bank.source_org_key",
+            "currency": "bank.original_currency",
+        },
+    )
+    return {
+        "vendor_bills": f"""
+          SELECT
+            bill.source_org_key AS organization,
+            CAST(bill.vendor_id AS STRING) AS vendor_id,
+            bill.vendor_name,
+            CAST(bill.bill_id AS STRING) AS bill_id,
+            bill.bill_number,
+            bill.bill_date,
+            bill.due_date,
+            bill.original_currency AS currency,
+            bill.total_amount AS bill_amount,
+            bill.balance_amount AS outstanding_balance,
+            bill.status AS zoho_bill_status
+          FROM {_table_name(project_id, BILLS_VIEW)} bill
+          {bills_filter}
+          ORDER BY bill.bill_date DESC, bill.vendor_name, bill.bill_number
+        """,
+        "vendor_payments": f"""
+          SELECT
+            payment.source_org_key AS organization,
+            CAST(payment.vendor_id AS STRING) AS vendor_id,
+            payment.vendor_name,
+            CAST(payment.payment_id AS STRING) AS payment_id,
+            payment.payment_number,
+            payment.payment_date,
+            payment.reference_number AS payment_reference,
+            payment.payment_mode,
+            payment.paid_through_account_name,
+            payment.currency_code AS currency,
+            payment.payment_amount AS total_payment_amount,
+            payment.allocated_amount,
+            payment.unapplied_amount,
+            payment.allocation_status
+          FROM {_table_name(project_id, PAYMENTS_VIEW)} payment
+          {payments_filter}
+          ORDER BY payment.payment_date DESC, payment.vendor_name, payment.payment_id
+        """,
+        "payment_allocations": f"""
+          SELECT
+            allocation.source_org_key AS organization,
+            CAST(allocation.payment_id AS STRING) AS payment_id,
+            CAST(allocation.bill_payment_id AS STRING) AS bill_payment_id,
+            CAST(allocation.bill_id AS STRING) AS bill_id,
+            allocation.bill_number,
+            allocation.amount_applied,
+            CAST(allocation.allocation_key AS STRING) AS allocation_key
+          FROM {_table_name(project_id, ALLOCATIONS_VIEW)} allocation
+          {allocations_filter}
+          ORDER BY allocation.payment_date DESC,
+                   allocation.payment_id, allocation.bill_id
+        """,
+        "bank_transactions": f"""
+          SELECT
+            bank.source_org_key AS organization,
+            bank.account_name,
+            CAST(bank.transaction_id AS STRING) AS transaction_id,
+            CAST(bank.bank_transaction_leg_key AS STRING)
+              AS bank_transaction_leg_key,
+            bank.transaction_date,
+            bank.transaction_type,
+            bank.reference_number,
+            bank.description,
+            bank.debit_or_credit,
+            bank.transaction_direction AS direction,
+            bank.original_currency AS currency,
+            bank.transaction_amount AS amount,
+            bank.signed_amount,
+            bank.status,
+            bank.multi_leg_transaction,
+            bank.bank_data_quality_status AS data_quality_status
+          FROM {_table_name(project_id, BANK_VIEW)} bank
+          {bank_filter}
+          ORDER BY bank.transaction_date DESC, bank.transaction_id,
+                   bank.account_name, bank.debit_or_credit
+        """,
+    }
+
+
+def build_vendor_reconciliation_queries(
+    project_id: str,
+    filters: Mapping[str, Any],
+) -> dict[str, str]:
+    """Build parameterized, source-scoped queries for every workbook dataset."""
     bills_filter = _where(
         filters,
         {
-            "start_date": "bill_date",
-            "end_date": "bill_date",
-            "organization": "source_org_key",
-            "vendor": "vendor_name",
-            "currency": "currency",
-            "source_bill_status": "source_bill_status",
-            "reconciliation_status": "reconciliation_status",
-            "review_required": "review_required",
+            "start_date": "reconciliation.bill_date",
+            "end_date": "reconciliation.bill_date",
+            "organization": "reconciliation.source_org_key",
+            "vendor": "reconciliation.vendor_name",
+            "currency": "reconciliation.currency",
+            "source_bill_status": "reconciliation.source_bill_status",
+            "reconciliation_status": "reconciliation.reconciliation_status",
+            "review_required": "reconciliation.review_required",
         },
     )
     payments_filter = _where(
@@ -573,106 +748,36 @@ def build_vendor_reconciliation_queries(
             "review_required": "usage.review_required",
         },
     )
-    exceptions_filter = _where(
-        filters,
-        {
-            "start_date": "record_date",
-            "end_date": "record_date",
-            "organization": "organization",
-            "vendor": "vendor_name",
-            "currency": "currency",
-            "bank_match_status": "bank_match_status",
-            "review_required": "review_required",
-        },
-    )
-    audit_filter = _where(
-        filters,
-        {
-            "start_date": "audit_date",
-            "end_date": "audit_date",
-            "organization": "source_org_key",
-        },
-    )
-
     return {
-        "vendor_master": f"""
-          WITH bill_activity AS (
-            SELECT
-              source_org_id,
-              CAST(vendor_id AS STRING) AS vendor_id,
-              COUNT(DISTINCT CAST(bill_id AS STRING)) AS bill_count
-            FROM {_table_name(project_id, BILLS_VIEW)} bill
-            {bill_activity_filter}
-            GROUP BY source_org_id, vendor_id
-          ),
-          payment_activity AS (
-            SELECT
-              source_org_id,
-              CAST(vendor_id AS STRING) AS vendor_id,
-              COUNT(DISTINCT CAST(payment_id AS STRING)) AS payment_count
-            FROM {_table_name(project_id, PAYMENTS_VIEW)} payment
-            {payment_activity_filter}
-            GROUP BY source_org_id, vendor_id
-          )
-          SELECT
-            contact.source_org_key AS organization,
-            CAST(contact.contact_id AS STRING) AS vendor_id,
-            COALESCE(
-              NULLIF(contact.contact_name, ''),
-              NULLIF(contact.company_name, ''),
-              CAST(contact.contact_id AS STRING)
-            ) AS vendor_name,
-            contact.company_name,
-            contact.status AS vendor_status,
-            contact.currency_code AS currency,
-            contact.outstanding_payable_amount AS outstanding_payable,
-            COALESCE(bill.bill_count, 0) > 0 AS has_bills,
-            COALESCE(payment.payment_count, 0) > 0 AS has_vendor_payments,
-            COALESCE(bill.bill_count, 0) AS bill_count,
-            COALESCE(payment.payment_count, 0) AS payment_count,
-            IF(
-              COALESCE(bill.bill_count, 0) > 0
-                OR COALESCE(payment.payment_count, 0) > 0,
-              'Reconciliation Activity',
-              'No Activity'
-            ) AS activity_status,
-            contact.contact_type AS _contact_type,
-            CAST(contact.source_org_id AS STRING) AS _source_org_id
-          FROM {_table_name(project_id, CONTACTS_VIEW)} contact
-          LEFT JOIN bill_activity bill
-            ON bill.source_org_id = contact.source_org_id
-           AND bill.vendor_id = CAST(contact.contact_id AS STRING)
-          LEFT JOIN payment_activity payment
-            ON payment.source_org_id = contact.source_org_id
-           AND payment.vendor_id = CAST(contact.contact_id AS STRING)
-          {vendor_master_filter}
-          {"AND" if vendor_master_filter else "WHERE"} LOWER(contact.contact_type) = 'vendor'
-            AND (
-              contact.source_org_id IS NOT NULL
-              OR NOT EXISTS (
-                SELECT 1
-                FROM {_table_name(project_id, CONTACTS_VIEW)} scoped_contact
-                WHERE scoped_contact.contact_id = contact.contact_id
-                  AND scoped_contact.source_org_id IS NOT NULL
-              )
-            )
-          ORDER BY contact.source_org_key, vendor_name, vendor_id
-        """,
         "vendor_bills": f"""
           SELECT
-            source_org_key AS organization,
-            CAST(vendor_id AS STRING) AS vendor_id,
-            vendor_name,
-            CAST(bill_id AS STRING) AS bill_id,
-            bill_number,
-            bill_date, due_date, currency, bill_amount,
-            source_outstanding_balance AS outstanding_balance, source_bill_status,
-            allocated_payment_count, allocated_amount, bank_verified_amount,
-            remaining_reconciliation_amount, reconciliation_status,
-            reconciliation_reason, review_required
-          FROM {_table_name(project_id, BILL_RECONCILIATION_VIEW)}
+            reconciliation.source_org_key AS organization,
+            CAST(reconciliation.vendor_id AS STRING) AS vendor_id,
+            reconciliation.vendor_name,
+            CAST(reconciliation.bill_id AS STRING) AS bill_id,
+            reconciliation.bill_number,
+            reconciliation.bill_date, reconciliation.due_date,
+            reconciliation.currency, reconciliation.bill_amount,
+            reconciliation.source_outstanding_balance AS outstanding_balance,
+            reconciliation.source_bill_status,
+            reconciliation.allocated_payment_count, reconciliation.allocated_amount,
+            reconciliation.bank_verified_amount,
+            reconciliation.remaining_reconciliation_amount,
+            reconciliation.reconciliation_status,
+            reconciliation.reconciliation_reason, reconciliation.review_required,
+            CAST(bill.source_record_id AS STRING) AS source_record_id,
+            IF(
+              reconciliation.bill_id IS NULL OR reconciliation.bill_amount IS NULL,
+              'Needs Review',
+              'Valid'
+            ) AS data_quality_status
+          FROM {_table_name(project_id, BILL_RECONCILIATION_VIEW)} reconciliation
+          LEFT JOIN {_table_name(project_id, BILLS_VIEW)} bill
+            ON bill.source_org_id = reconciliation.source_org_id
+           AND bill.bill_id = reconciliation.bill_id
           {bills_filter}
-          ORDER BY bill_date DESC, vendor_name, bill_number
+          ORDER BY reconciliation.bill_date DESC,
+                   reconciliation.vendor_name, reconciliation.bill_number
         """,
         "vendor_payments": f"""
           SELECT
@@ -696,7 +801,9 @@ def build_vendor_reconciliation_queries(
             match.bank_transaction_date,
             match.bank_amount,
             match.review_required,
-            CAST(match.bank_transaction_leg_key AS STRING) AS _bank_transaction_leg_key,
+            CAST(payment.source_record_id AS STRING) AS source_record_id,
+            CAST(match.bank_transaction_leg_key AS STRING) AS bank_transaction_leg_key,
+            payment.allocation_status AS data_quality_status,
             CAST(payment.source_org_id AS STRING) AS _source_org_id
           FROM {_table_name(project_id, PAYMENTS_VIEW)} payment
           JOIN {_table_name(project_id, PAYMENT_MATCHES_VIEW)} match
@@ -717,7 +824,9 @@ def build_vendor_reconciliation_queries(
             currency_code AS currency,
             amount_applied,
             payment_date,
-            CAST(allocation_key AS STRING) AS allocation_key
+            CAST(allocation_key AS STRING) AS allocation_key,
+            CAST(source_record_id AS STRING) AS source_record_id,
+            IF(amount_applied IS NULL, 'Needs Review', 'Valid') AS data_quality_status
           FROM {_table_name(project_id, ALLOCATIONS_VIEW)}
           {allocations_filter}
           QUALIFY ROW_NUMBER() OVER (
@@ -751,10 +860,12 @@ def build_vendor_reconciliation_queries(
             bank.signed_amount,
             bank.status,
             bank.multi_leg_transaction,
-            bank.bank_data_quality_status,
             COALESCE(usage.used_in_vendor_match, FALSE) AS used_in_vendor_match,
             COALESCE(usage.review_required, FALSE) AS review_required,
-            CAST(bank.bank_transaction_leg_key AS STRING) AS _bank_transaction_leg_key,
+            CAST(bank.source_record_id AS STRING) AS source_record_id,
+            CAST(bank.bank_transaction_leg_key AS STRING) AS bank_transaction_leg_key,
+            'bank_transaction_leg' AS match_method,
+            bank.bank_data_quality_status AS data_quality_status,
             usage.bank_match_status
           FROM {_table_name(project_id, BANK_VIEW)} bank
           LEFT JOIN match_usage usage
@@ -764,123 +875,110 @@ def build_vendor_reconciliation_queries(
                    bank.account_id, bank.debit_or_credit
         """,
         "reconciliation_results": f"""
-          SELECT
-            source_org_key AS organization,
-            CAST(vendor_id AS STRING) AS vendor_id,
-            vendor_name,
-            CAST(bill_id AS STRING) AS bill_id,
-            bill_number,
-            bill_date, due_date, currency, bill_amount, source_outstanding_balance,
-            source_bill_status,
-            allocated_payment_count AS payment_count,
-            CAST(payment_ids AS STRING) AS payment_ids,
-            latest_payment_date, allocated_amount, bank_verified_amount,
-            bank_pending_amount, remaining_reconciliation_amount,
-            reconciliation_status, reconciliation_reason, review_required
-          FROM {_table_name(project_id, BILL_RECONCILIATION_VIEW)}
-          {bills_filter}
-          ORDER BY bill_date DESC, vendor_name, bill_number
-        """,
-        "exceptions": f"""
-          WITH exception_rows AS (
+          WITH payment_rows AS (
             SELECT
-              exception.exception_type,
-              COALESCE(bill.source_org_key, payment.source_org_key, exception.source_org_id)
-                AS organization,
-              CAST(exception.vendor_id AS STRING) AS vendor_id,
-              exception.vendor_name,
-              CAST(exception.bill_id AS STRING) AS bill_id,
-              CAST(exception.payment_id AS STRING) AS payment_id,
-              IF(
-                exception.bank_transaction_leg_key IS NULL,
-                NULL,
-                CONCAT('...', RIGHT(exception.bank_transaction_leg_key, 4))
-              ) AS masked_bank_leg_key,
-              exception.currency,
-              exception.amount,
-              exception.exception_reason,
-              exception.review_required,
-              CAST(NULL AS STRING) AS review_status,
-              CAST(NULL AS STRING) AS reviewer_comment,
-              COALESCE(bill.bill_date, payment.payment_date) AS record_date,
-              payment.bank_match_status
-            FROM {_table_name(project_id, EXCEPTIONS_VIEW)} exception
-            LEFT JOIN {_table_name(project_id, BILL_RECONCILIATION_VIEW)} bill
-              ON bill.source_org_id = exception.source_org_id
-             AND bill.bill_id = exception.bill_id
-            LEFT JOIN {_table_name(project_id, PAYMENT_MATCHES_VIEW)} payment
-              ON payment.source_org_id = exception.source_org_id
-             AND payment.payment_id = exception.payment_id
-          )
-          SELECT * EXCEPT(record_date, bank_match_status)
-          FROM exception_rows
-          {exceptions_filter}
-          ORDER BY exception_type, organization, bill_id, payment_id
-        """,
-        "technical_audit": f"""
-          WITH audit_rows AS (
-            SELECT
-              'Bill' AS record_type, source_org_key, source_org_id, source_record_id,
-              bill_id, CAST(NULL AS STRING) AS payment_id,
-              CAST(NULL AS STRING) AS allocation_key,
-              CAST(NULL AS STRING) AS bank_transaction_leg_key,
-              run_id, loaded_at AS loaded_timestamp,
-              'source_bill' AS mapping_match_method,
-              IF(bill_id IS NULL OR total_amount IS NULL, 'Needs Review', 'Valid')
-                AS data_quality_status,
-              bill_date AS audit_date
-            FROM {_table_name(project_id, BILLS_VIEW)}
-            UNION ALL
-            SELECT
-              'Vendor Payment', payment.source_org_key, payment.source_org_id,
-              payment.source_record_id,
-              CAST(NULL AS STRING), payment.payment_id, CAST(NULL AS STRING),
-              IF(
-                match.bank_transaction_leg_key IS NULL,
-                NULL,
-                CONCAT('...', RIGHT(match.bank_transaction_leg_key, 4))
-              ),
-              payment.run_id, payment.loaded_at, match.bank_match_method,
-              payment.allocation_status, payment.payment_date
-            FROM {_table_name(project_id, PAYMENTS_VIEW)} payment
+              allocation.source_org_id,
+              allocation.bill_id,
+              allocation.payment_id,
+              ANY_VALUE(payment.payment_amount) AS payment_amount,
+              MAX(match.bank_transaction_date) AS bank_transaction_date,
+              ANY_VALUE(match.bank_amount) AS bank_amount,
+              ANY_VALUE(match.bank_match_status) AS bank_match_status,
+              ANY_VALUE(match.bank_match_method) AS bank_match_method
+            FROM {_table_name(project_id, ALLOCATIONS_VIEW)} allocation
+            LEFT JOIN {_table_name(project_id, PAYMENTS_VIEW)} payment
+              ON payment.source_org_id = allocation.source_org_id
+             AND payment.payment_id = allocation.payment_id
             LEFT JOIN {_table_name(project_id, PAYMENT_MATCHES_VIEW)} match
-              ON match.source_org_id = payment.source_org_id
-             AND match.payment_id = payment.payment_id
-            UNION ALL
+              ON match.source_org_id = allocation.source_org_id
+             AND match.payment_id = allocation.payment_id
+            GROUP BY
+              allocation.source_org_id,
+              allocation.bill_id,
+              allocation.payment_id
+          ),
+          payment_details AS (
             SELECT
-              'Payment Allocation', source_org_key, source_org_id, source_record_id,
-              bill_id, payment_id, allocation_key, CAST(NULL AS STRING),
-              run_id, loaded_at, 'payment_to_bill_allocation',
-              IF(amount_applied IS NULL, 'Needs Review', 'Valid'), payment_date
-            FROM {_table_name(project_id, ALLOCATIONS_VIEW)}
-            UNION ALL
+              source_org_id,
+              bill_id,
+              SUM(COALESCE(payment_amount, 0)) AS payment_amount,
+              MAX(bank_transaction_date) AS bank_transaction_date,
+              SUM(COALESCE(bank_amount, 0)) AS bank_amount,
+              STRING_AGG(
+                DISTINCT bank_match_status,
+                ', ' ORDER BY bank_match_status
+              ) AS bank_match_status,
+              STRING_AGG(
+                DISTINCT bank_match_method,
+                ', ' ORDER BY bank_match_method
+              ) AS bank_match_method
+            FROM payment_rows
+            GROUP BY source_org_id, bill_id
+          ),
+          exception_details AS (
             SELECT
-              'Bank Transaction', source_org_key, source_org_id,
-              IF(
-                source_record_id IS NULL,
-                NULL,
-                CONCAT('...', RIGHT(source_record_id, 4))
-              ),
-              CAST(NULL AS STRING), CAST(NULL AS STRING), CAST(NULL AS STRING),
-              CONCAT('...', RIGHT(bank_transaction_leg_key, 4)),
-              run_id, loaded_at, 'bank_transaction_leg',
-              bank_data_quality_status, transaction_date
-            FROM {_table_name(project_id, BANK_VIEW)}
+              reconciliation.source_org_id,
+              reconciliation.bill_id,
+              STRING_AGG(
+                DISTINCT exception.exception_type,
+                ', ' ORDER BY exception.exception_type
+              ) AS exception_type,
+              LOGICAL_OR(COALESCE(exception.review_required, FALSE))
+                AS exception_review_required
+            FROM {_table_name(project_id, BILL_RECONCILIATION_VIEW)} reconciliation
+            LEFT JOIN {_table_name(project_id, ALLOCATIONS_VIEW)} allocation
+              ON allocation.source_org_id = reconciliation.source_org_id
+             AND allocation.bill_id = reconciliation.bill_id
+            LEFT JOIN {_table_name(project_id, EXCEPTIONS_VIEW)} exception
+              ON exception.source_org_id = reconciliation.source_org_id
+             AND (
+               exception.bill_id = reconciliation.bill_id
+               OR (
+                 exception.bill_id IS NULL
+                 AND exception.payment_id = allocation.payment_id
+               )
+             )
+            GROUP BY reconciliation.source_org_id, reconciliation.bill_id
           )
           SELECT
-            record_type,
-            CAST(source_org_id AS STRING) AS source_org_id,
-            CAST(source_record_id AS STRING) AS source_record_id,
-            CAST(bill_id AS STRING) AS bill_id,
-            CAST(payment_id AS STRING) AS payment_id,
-            CAST(allocation_key AS STRING) AS allocation_key,
-            CAST(bank_transaction_leg_key AS STRING) AS bank_transaction_leg_key,
-            CAST(run_id AS STRING) AS run_id,
-            loaded_timestamp,
-            mapping_match_method, data_quality_status
-          FROM audit_rows
-          {audit_filter}
-          ORDER BY record_type, loaded_timestamp DESC
+            reconciliation.source_org_key AS organization,
+            CAST(reconciliation.vendor_id AS STRING) AS vendor_id,
+            reconciliation.vendor_name,
+            CAST(reconciliation.bill_id AS STRING) AS bill_id,
+            reconciliation.bill_number,
+            reconciliation.bill_date, reconciliation.due_date,
+            reconciliation.currency, reconciliation.bill_amount,
+            reconciliation.source_outstanding_balance,
+            reconciliation.source_bill_status,
+            reconciliation.allocated_payment_count AS payment_count,
+            CAST(reconciliation.payment_ids AS STRING) AS payment_ids,
+            reconciliation.latest_payment_date,
+            COALESCE(payment.payment_amount, 0) AS payment_amount,
+            reconciliation.allocated_amount,
+            payment.bank_transaction_date,
+            COALESCE(payment.bank_amount, 0) AS bank_amount,
+            payment.bank_match_status,
+            payment.bank_match_method,
+            reconciliation.bank_pending_amount,
+            reconciliation.remaining_reconciliation_amount,
+            reconciliation.reconciliation_status,
+            reconciliation.reconciliation_reason,
+            exception.exception_type,
+            reconciliation.review_required
+              OR COALESCE(exception.exception_review_required, FALSE)
+              AS review_required,
+            'Pending' AS review_status,
+            CAST(NULL AS STRING) AS reviewer_comment
+          FROM {_table_name(project_id, BILL_RECONCILIATION_VIEW)} reconciliation
+          LEFT JOIN payment_details payment
+            ON payment.source_org_id = reconciliation.source_org_id
+           AND payment.bill_id = reconciliation.bill_id
+          LEFT JOIN exception_details exception
+            ON exception.source_org_id = reconciliation.source_org_id
+           AND exception.bill_id = reconciliation.bill_id
+          {bills_filter}
+          ORDER BY reconciliation.bill_date DESC,
+                   reconciliation.vendor_name, reconciliation.bill_number
         """,
     }
 
@@ -905,6 +1003,70 @@ def safe_exception_details(error: Exception, max_length: int = 4000) -> str:
 def _rename_query_columns(dataframe: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
     mapping = DISPLAY_COLUMN_MAPS[dataset_name]
     return dataframe.rename(columns=mapping).reindex(columns=list(mapping.values()))
+
+
+def _rename_input_query_columns(
+    dataframe: pd.DataFrame,
+    dataset_name: str,
+) -> pd.DataFrame:
+    mapping = INPUT_DISPLAY_COLUMN_MAPS[dataset_name]
+    return dataframe.rename(columns=mapping).reindex(columns=list(mapping.values()))
+
+
+def fetch_reconciliation_input_data(
+    start_date: date,
+    end_date: date,
+    organization: str | None = None,
+    vendor: str | None = None,
+    currency: str | None = None,
+    project_id: str | None = None,
+    location: str | None = None,
+    client: Any | None = None,
+) -> tuple[dict[str, pd.DataFrame], dict[str, Any]]:
+    """Fetch the Silver inputs required for finance-led reconciliation."""
+    from google.cloud import bigquery
+
+    if start_date > end_date:
+        raise ValueError("Start date must be on or before end date.")
+    resolved_project_id = _project_id(project_id)
+    resolved_location = _bigquery_location(location)
+    query_client = client or bigquery.Client(
+        project=resolved_project_id,
+        location=resolved_location,
+    )
+    filters = {
+        "start_date": start_date,
+        "end_date": end_date,
+        "organization": organization,
+        "vendor": vendor,
+        "currency": currency,
+    }
+    parameters = _query_parameters(**filters)
+    queries = build_reconciliation_input_queries(resolved_project_id, filters)
+    if any("finance_silver.fact_transactions" in query for query in queries.values()):
+        raise VendorReportValidationError("Legacy fact_transactions query is prohibited.")
+    datasets = {
+        name: _rename_input_query_columns(
+            _query_to_dataframe(
+                query_client,
+                query,
+                [
+                    parameter
+                    for parameter in parameters
+                    if f"@{parameter.name}" in query
+                ],
+                location=resolved_location,
+            ),
+            name,
+        )
+        for name, query in queries.items()
+    }
+    return datasets, {
+        "project_id": resolved_project_id,
+        "location": resolved_location,
+        "queries": queries,
+        "filters": filters,
+    }
 
 
 def fetch_vendor_report_data(
@@ -1058,78 +1220,188 @@ def _numeric(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").fillna(0)
 
 
+def _duplicate_count(frame: pd.DataFrame, columns: list[str]) -> int:
+    if frame.empty or not set(columns).issubset(frame.columns):
+        return 0
+    return int(frame.duplicated(columns, keep=False).sum())
+
+
+def combine_zoho_payment_batch(
+    payments: pd.DataFrame,
+    allocations: pd.DataFrame,
+) -> pd.DataFrame:
+    """Left-join allocation detail to payment headers without losing payments."""
+    payment_headers = _clean_dataframe(payments, INPUT_VENDOR_PAYMENT_COLUMNS)
+    allocation_rows = _clean_dataframe(
+        allocations,
+        INPUT_PAYMENT_ALLOCATION_COLUMNS,
+    )
+    allocation_detail_columns = [
+        "Organization",
+        "Payment ID",
+        "Bill Payment ID",
+        "Bill ID",
+        "Bill Number",
+        "Amount Applied",
+    ]
+    batch = payment_headers.merge(
+        allocation_rows.reindex(columns=allocation_detail_columns),
+        on=["Organization", "Payment ID"],
+        how="left",
+        validate="one_to_many",
+    )
+    return batch.reindex(columns=ZOHO_PAYMENT_BATCH_COLUMNS)
+
+
+def validate_reconciliation_input_data(
+    datasets: Mapping[str, pd.DataFrame],
+    queries: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Block input workbooks that would hand finance incomplete or unsafe data."""
+    bills = _clean_dataframe(
+        datasets.get("vendor_bills"),
+        INPUT_VENDOR_BILL_COLUMNS,
+    )
+    payments = _clean_dataframe(
+        datasets.get("vendor_payments"),
+        INPUT_VENDOR_PAYMENT_COLUMNS,
+    )
+    allocations = _clean_dataframe(
+        datasets.get("payment_allocations"),
+        INPUT_PAYMENT_ALLOCATION_COLUMNS,
+    )
+    banks = _clean_dataframe(
+        datasets.get("bank_transactions"),
+        INPUT_BANK_TRANSACTION_COLUMNS,
+    )
+
+    allocation_exceeds_payment = 0
+    missing_allocation_payment_ids = 0
+    if not allocations.empty:
+        allocation_totals = (
+            allocations.assign(_allocated=_numeric(allocations["Amount Applied"]))
+            .groupby(["Organization", "Payment ID"], dropna=False)["_allocated"]
+            .sum()
+            .reset_index()
+        )
+        payment_amounts = payments[
+            ["Organization", "Payment ID", "Total Payment Amount"]
+        ].assign(
+            _payment_amount=lambda frame: _numeric(frame["Total Payment Amount"]),
+            _payment_exists=True,
+        )
+        comparison = allocation_totals.merge(
+            payment_amounts[
+                [
+                    "Organization",
+                    "Payment ID",
+                    "_payment_amount",
+                    "_payment_exists",
+                ]
+            ],
+            on=["Organization", "Payment ID"],
+            how="left",
+        )
+        missing_allocation_payment_ids = int(
+            comparison["_payment_exists"].isna().sum()
+        )
+        allocation_exceeds_payment = int(
+            (
+                comparison["_payment_exists"].notna()
+                & ((comparison["_allocated"] - comparison["_payment_amount"]) > 0.01)
+            ).sum()
+        )
+
+    missing_allocation_bill_ids = 0
+    if not allocations.empty and not bills.empty:
+        bill_orgs = set(bills["Organization"].dropna().astype(str))
+        checkable_allocations = allocations[
+            allocations["Organization"].astype(str).isin(bill_orgs)
+            & allocations["Bill ID"].notna()
+            & allocations["Bill ID"].astype(str).ne("")
+        ]
+        if not checkable_allocations.empty:
+            bill_keys = bills[["Organization", "Bill ID"]].drop_duplicates().assign(
+                _bill_exists=True
+            )
+            bill_comparison = checkable_allocations.merge(
+                bill_keys,
+                on=["Organization", "Bill ID"],
+                how="left",
+            )
+            missing_allocation_bill_ids = int(
+                bill_comparison["_bill_exists"].isna().sum()
+            )
+
+    query_text = "\n".join((queries or {}).values()).lower()
+    legacy_query_count = query_text.count("finance_silver.fact_transactions")
+    journal_query_count = sum(
+        prohibited in query_text
+        for prohibited in (
+            "finance_silver.fact_journals",
+            "finance_silver.fact_journal",
+        )
+    )
+    checks = {
+        "duplicate_bill_ids": _duplicate_count(
+            bills,
+            ["Organization", "Bill ID"],
+        ),
+        "duplicate_payment_ids": _duplicate_count(
+            payments,
+            ["Organization", "Payment ID"],
+        ),
+        "duplicate_allocation_keys": _duplicate_count(
+            allocations,
+            ["Organization", "Allocation Key"],
+        ),
+        "duplicate_bank_transaction_leg_keys": _duplicate_count(
+            banks,
+            ["Bank Transaction Leg Key"],
+        ),
+        "allocations_exceeding_payment": allocation_exceeds_payment,
+        "allocation_payment_ids_missing_from_vendor_payments": (
+            missing_allocation_payment_ids
+        ),
+        "allocation_bill_ids_missing_from_bills": missing_allocation_bill_ids,
+        "legacy_fact_transactions_queries": legacy_query_count,
+        "journal_queries_used_as_vendor_payments": journal_query_count,
+        "organizations_kept_separate": True,
+        "currency_totals_separated": True,
+    }
+    failures = {
+        name: value
+        for name, value in checks.items()
+        if (isinstance(value, bool) and not value)
+        or (not isinstance(value, bool) and value != 0)
+    }
+    if failures:
+        details = ", ".join(f"{name}={value}" for name, value in failures.items())
+        raise VendorReportValidationError(
+            "Reconciliation input workbook blocked by validation failure: "
+            f"{details}"
+        )
+    return checks
+
+
 def validate_vendor_report_data(
     datasets: Mapping[str, pd.DataFrame],
     queries: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run blocking grain and financial validations before workbook creation."""
-    vendor_master = datasets.get("vendor_master", pd.DataFrame())
     bills = datasets.get("vendor_bills", pd.DataFrame())
     payments = datasets.get("vendor_payments", pd.DataFrame())
     allocations = datasets.get("payment_allocations", pd.DataFrame())
     banks = datasets.get("bank_transactions", pd.DataFrame())
     reconciliation = datasets.get("reconciliation_results", pd.DataFrame())
 
-    def duplicate_count(frame: pd.DataFrame, columns: list[str]) -> int:
-        if frame.empty or not set(columns).issubset(frame.columns):
-            return 0
-        return int(frame.duplicated(columns, keep=False).sum())
-
-    duplicate_bill_ids = duplicate_count(bills, ["Organization", "Bill ID"])
-    duplicate_vendor_master_ids = duplicate_count(
-        vendor_master,
-        ["Organization", "Vendor ID"],
-    )
-    duplicate_payment_ids = duplicate_count(payments, ["Organization", "Payment ID"])
-    duplicate_allocation_keys = duplicate_count(
+    duplicate_bill_ids = _duplicate_count(bills, ["Organization", "Bill ID"])
+    duplicate_payment_ids = _duplicate_count(payments, ["Organization", "Payment ID"])
+    duplicate_allocation_keys = _duplicate_count(
         allocations,
         ["Organization", "Allocation Key"],
     )
-    duplicate_bank_legs = duplicate_count(banks, ["_Bank Transaction Leg Key"])
-
-    non_vendor_master_contacts = 0
-    vendor_master_activity_mismatches = 0
-    if not vendor_master.empty:
-        if "_Contact Type" not in vendor_master.columns:
-            non_vendor_master_contacts = len(vendor_master)
-        else:
-            non_vendor_master_contacts = int(
-                vendor_master["_Contact Type"]
-                .fillna("")
-                .astype(str)
-                .str.lower()
-                .ne("vendor")
-                .sum()
-            )
-        required_activity_columns = {
-            "Has Bills",
-            "Has Vendor Payments",
-            "Bill Count",
-            "Payment Count",
-            "Activity Status",
-        }
-        if required_activity_columns.issubset(vendor_master.columns):
-            expected_has_bills = _numeric(vendor_master["Bill Count"]).gt(0)
-            expected_has_payments = _numeric(vendor_master["Payment Count"]).gt(0)
-            actual_has_bills = vendor_master["Has Bills"].fillna(False).astype(bool)
-            actual_has_payments = (
-                vendor_master["Has Vendor Payments"].fillna(False).astype(bool)
-            )
-            expected_status = (expected_has_bills | expected_has_payments).map(
-                {
-                    True: "Reconciliation Activity",
-                    False: "No Activity",
-                }
-            )
-            vendor_master_activity_mismatches = int(
-                (
-                    actual_has_bills.ne(expected_has_bills)
-                    | actual_has_payments.ne(expected_has_payments)
-                    | vendor_master["Activity Status"].ne(expected_status)
-                ).sum()
-            )
-        else:
-            vendor_master_activity_mismatches = len(vendor_master)
+    duplicate_bank_legs = _duplicate_count(banks, ["Bank Transaction Leg Key"])
 
     credit_used_count = 0
     if not banks.empty and {"Used in Vendor Match", "Debit/Credit"}.issubset(banks.columns):
@@ -1143,15 +1415,15 @@ def validate_vendor_report_data(
     duplicate_final_bank_assignments = 0
     if not payments.empty and {
         "Bank Match Status",
-        "_Bank Transaction Leg Key",
+        "Bank Transaction Leg Key",
     }.issubset(payments.columns):
         final = payments[
             payments["Bank Match Status"].eq("Bank Verified")
-            & payments["_Bank Transaction Leg Key"].notna()
+            & payments["Bank Transaction Leg Key"].notna()
         ]
-        duplicate_final_bank_assignments = duplicate_count(
+        duplicate_final_bank_assignments = _duplicate_count(
             final,
-            ["_Bank Transaction Leg Key"],
+            ["Bank Transaction Leg Key"],
         )
 
     allocation_exceeds_payment = 0
@@ -1194,7 +1466,10 @@ def validate_vendor_report_data(
     if not reconciliation.empty:
         matched_amount_exceeds_bill = int(
             (
-                _numeric(reconciliation["Bank-Verified Amount"])
+                (
+                    _numeric(reconciliation["Allocated Amount"])
+                    - _numeric(reconciliation["Bank Pending Amount"])
+                )
                 - _numeric(reconciliation["Bill Amount"])
                 > 0.01
             ).sum()
@@ -1222,9 +1497,6 @@ def validate_vendor_report_data(
         for query in (queries or {}).values()
     )
     checks = {
-        "duplicate_vendor_master_ids": duplicate_vendor_master_ids,
-        "non_vendor_master_contacts": non_vendor_master_contacts,
-        "vendor_master_activity_mismatches": vendor_master_activity_mismatches,
         "duplicate_bill_ids": duplicate_bill_ids,
         "duplicate_payment_ids": duplicate_payment_ids,
         "duplicate_allocation_keys": duplicate_allocation_keys,
@@ -1344,12 +1616,201 @@ def _write_detail_sheet(
         worksheet.column_dimensions[get_column_letter(column_index)].width = 48
 
 
+def summarize_reconciliation_input(
+    datasets: Mapping[str, pd.DataFrame],
+    filters: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Summarize source records without producing reconciliation conclusions."""
+    bills = datasets.get("vendor_bills", pd.DataFrame())
+    payments = datasets.get("vendor_payments", pd.DataFrame())
+    allocations = datasets.get("payment_allocations", pd.DataFrame())
+    banks = datasets.get("bank_transactions", pd.DataFrame())
+    selected_filters = filters or {}
+    organizations = sorted(
+        {
+            str(value)
+            for frame in (bills, payments, banks)
+            if "Organization" in frame
+            for value in frame["Organization"].dropna()
+        }
+    )
+    currencies = sorted(
+        {
+            str(value)
+            for frame in (bills, payments, banks)
+            if "Currency" in frame
+            for value in frame["Currency"].dropna()
+        }
+    )
+    currency_rows = []
+    for currency in currencies:
+        bill_rows = bills[bills["Currency"].astype(str).eq(currency)]
+        payment_rows = payments[payments["Currency"].astype(str).eq(currency)]
+        payment_keys = payment_rows[["Organization", "Payment ID"]].drop_duplicates()
+        allocation_rows = allocations.merge(
+            payment_keys,
+            on=["Organization", "Payment ID"],
+            how="inner",
+        )
+        bank_rows = banks[banks["Currency"].astype(str).eq(currency)]
+        currency_rows.append(
+            {
+                "currency": currency,
+                "bill_count": len(bill_rows),
+                "bill_total": float(_numeric(bill_rows["Bill Amount"]).sum()),
+                "payment_count": len(payment_rows),
+                "payment_total": float(
+                    _numeric(payment_rows["Total Payment Amount"]).sum()
+                ),
+                "allocation_count": len(allocation_rows),
+                "allocation_total": float(
+                    _numeric(allocation_rows["Amount Applied"]).sum()
+                ),
+                "bank_leg_count": len(bank_rows),
+                "bank_total": float(_numeric(bank_rows["Amount"]).sum()),
+            }
+        )
+    return {
+        "report_start_date": selected_filters.get("start_date"),
+        "report_end_date": selected_filters.get("end_date"),
+        "organizations": organizations,
+        "bill_record_count": len(bills),
+        "vendor_payment_count": len(payments),
+        "payment_allocation_count": len(allocations),
+        "bank_transaction_leg_count": len(banks),
+        "currency_totals": currency_rows,
+        "generated_timestamp": datetime.now(timezone.utc).replace(tzinfo=None),
+    }
+
+
+def _write_input_summary(
+    worksheet: Any,
+    summary: Mapping[str, Any],
+) -> None:
+    _style_title(worksheet, REPORT_MODE_INPUT, 9)
+    worksheet.sheet_view.showGridLines = False
+    worksheet.freeze_panes = "A3"
+    widths = [34, 24, 15, 18, 21, 18, 21, 16, 18]
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[get_column_letter(index)].width = width
+
+    metadata = [
+        ("Report start date", summary.get("report_start_date")),
+        ("Report end date", summary.get("report_end_date")),
+        ("Organizations", ", ".join(summary.get("organizations", [])) or "None"),
+        ("Bill record count", summary["bill_record_count"]),
+        ("Vendor-payment count", summary["vendor_payment_count"]),
+        ("Payment-allocation count", summary["payment_allocation_count"]),
+        ("Bank-transaction-leg count", summary["bank_transaction_leg_count"]),
+        ("Generated timestamp", summary["generated_timestamp"]),
+    ]
+    row = 3
+    for label, value in metadata:
+        worksheet.cell(row, 1, label).font = Font(bold=True, color="17365D")
+        worksheet.cell(row, 2, _excel_value(value))
+        if isinstance(value, datetime):
+            worksheet.cell(row, 2).number_format = "yyyy-mm-dd hh:mm"
+        elif isinstance(value, date):
+            worksheet.cell(row, 2).number_format = "yyyy-mm-dd"
+        elif isinstance(value, int):
+            worksheet.cell(row, 2).number_format = "#,##0"
+        row += 1
+
+    row += 1
+    headers = [
+        "Currency",
+        "Bill Count",
+        "Bill Total",
+        "Vendor-Payment Count",
+        "Vendor-Payment Total",
+        "Allocation Count",
+        "Allocation Total",
+        "Bank-Leg Count",
+        "Bank Amount Total",
+    ]
+    for column, label in enumerate(headers, start=1):
+        cell = worksheet.cell(row, column, label)
+        cell.fill = PatternFill("solid", fgColor="4472C4")
+        cell.font = Font(color="FFFFFF", bold=True)
+        cell.alignment = Alignment(horizontal="center")
+    currency_header_row = row
+    for totals in summary["currency_totals"]:
+        row += 1
+        values = [
+            totals["currency"],
+            totals["bill_count"],
+            totals["bill_total"],
+            totals["payment_count"],
+            totals["payment_total"],
+            totals["allocation_count"],
+            totals["allocation_total"],
+            totals["bank_leg_count"],
+            totals["bank_total"],
+        ]
+        for column, value in enumerate(values, start=1):
+            cell = worksheet.cell(row, column, value)
+            if column in {2, 4, 6, 8}:
+                cell.number_format = "#,##0"
+            elif column > 1:
+                cell.number_format = '#,##0.00;[Red](#,##0.00);-'
+    worksheet.auto_filter.ref = (
+        f"A{currency_header_row}:I{max(currency_header_row, row)}"
+    )
+
+
+def create_reconciliation_input_workbook(
+    datasets: Mapping[str, pd.DataFrame] | None,
+    filters: Mapping[str, Any] | None = None,
+    validation_results: Mapping[str, Any] | None = None,
+) -> Workbook:
+    """Create the four-sheet, finance-led reconciliation input workbook."""
+    source = datasets or {}
+    validations = dict(
+        validation_results
+        or validate_reconciliation_input_data(source)
+    )
+    cleaned = {
+        name: _clean_dataframe(source.get(name), columns)
+        for name, columns in INPUT_DATASET_COLUMNS.items()
+    }
+    payment_batch = combine_zoho_payment_batch(
+        cleaned["vendor_payments"],
+        cleaned["payment_allocations"],
+    )
+    summary = summarize_reconciliation_input(cleaned, filters)
+
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    sheets = {
+        name: workbook.create_sheet(name)
+        for name in INPUT_WORKBOOK_SHEETS
+    }
+    _write_input_summary(sheets["Summary"], summary)
+    _write_detail_sheet(
+        sheets["Vendor Bills"],
+        "Vendor Bills",
+        cleaned["vendor_bills"],
+    )
+    _write_detail_sheet(
+        sheets["Zoho Payment Batch"],
+        "Zoho Payment Batch",
+        payment_batch,
+    )
+    _write_detail_sheet(
+        sheets["Bank Transactions"],
+        "Bank Transactions",
+        cleaned["bank_transactions"],
+    )
+    workbook.calculation.fullCalcOnLoad = True
+    workbook.calculation.forceFullCalc = True
+    return workbook
+
+
 def summarize_vendor_report(
     datasets: Mapping[str, pd.DataFrame],
     filters: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Calculate KPI and currency-separated totals for Summary and UI cards."""
-    vendor_master = datasets.get("vendor_master", pd.DataFrame())
     bills = datasets.get("vendor_bills", pd.DataFrame())
     payments = datasets.get("vendor_payments", pd.DataFrame())
     allocations = datasets.get("payment_allocations", pd.DataFrame())
@@ -1360,16 +1821,17 @@ def summarize_vendor_report(
     organizations = sorted(
         {
             str(value)
-            for frame in (vendor_master, bills, payments, banks)
+            for frame in (bills, payments, banks)
             if "Organization" in frame
             for value in frame["Organization"].dropna()
         }
     )
-    activity_counts = (
-        vendor_master.get("Activity Status", pd.Series(dtype="object"))
-        .value_counts()
-        .to_dict()
-    )
+    active_vendor_keys = {
+        (str(row["Organization"]), str(row["Vendor ID"]))
+        for frame in (bills, payments)
+        if {"Organization", "Vendor ID"}.issubset(frame.columns)
+        for _, row in frame[["Organization", "Vendor ID"]].dropna().iterrows()
+    }
     reconciliation_counts = (
         reconciliation.get("Reconciliation Status", pd.Series(dtype="object"))
         .value_counts()
@@ -1385,7 +1847,10 @@ def summarize_vendor_report(
         grouped = reconciliation.assign(
             _bill=_numeric(reconciliation["Bill Amount"]),
             _allocated=_numeric(reconciliation["Allocated Amount"]),
-            _verified=_numeric(reconciliation["Bank-Verified Amount"]),
+            _verified=(
+                _numeric(reconciliation["Allocated Amount"])
+                - _numeric(reconciliation["Bank Pending Amount"])
+            ),
             _outstanding=_numeric(reconciliation["Source Outstanding Balance"]),
         ).groupby("Currency", dropna=False)
         for currency, group in grouped:
@@ -1402,12 +1867,7 @@ def summarize_vendor_report(
         "report_start_date": selected_filters.get("start_date"),
         "report_end_date": selected_filters.get("end_date"),
         "organizations": organizations,
-        "total_master_vendors": len(vendor_master),
-        "vendors_with_reconciliation_activity": int(
-            activity_counts.get("Reconciliation Activity", 0)
-        ),
-        "vendors_with_no_activity": int(activity_counts.get("No Activity", 0)),
-        "total_vendors": len(vendor_master),
+        "total_vendors": len(active_vendor_keys),
         "total_bills": len(bills),
         "total_vendor_payments": len(payments),
         "total_payment_allocations": len(allocations),
@@ -1423,7 +1883,14 @@ def _write_summary(
     summary: Mapping[str, Any],
     validations: Mapping[str, Any],
 ) -> None:
-    _style_title(worksheet, "Vendor Reconciliation Report", 6)
+    _style_title(worksheet, REPORT_MODE_ANALYSIS, 6)
+    worksheet.merge_cells("A2:F2")
+    disclaimer = worksheet["A2"]
+    disclaimer.value = ANALYSIS_DISCLAIMER
+    disclaimer.font = Font(bold=True, color="9C5700")
+    disclaimer.fill = PatternFill("solid", fgColor="FFF2CC")
+    disclaimer.alignment = Alignment(wrap_text=True, vertical="center")
+    worksheet.row_dimensions[2].height = 32
     worksheet.sheet_view.showGridLines = False
     worksheet.freeze_panes = "A3"
     worksheet.column_dimensions["A"].width = 42
@@ -1455,12 +1922,7 @@ def _write_summary(
     for cell in worksheet[row][:2]:
         cell.font = Font(color="FFFFFF", bold=True)
     kpis = [
-        ("Total Master Vendors", summary["total_master_vendors"]),
-        (
-            "Vendors With Reconciliation Activity",
-            summary["vendors_with_reconciliation_activity"],
-        ),
-        ("Vendors With No Activity", summary["vendors_with_no_activity"]),
+        ("Total Vendors", summary["total_vendors"]),
         ("Total Bills", summary["total_bills"]),
         ("Total Vendor Payments", summary["total_vendor_payments"]),
         ("Total Payment Allocations", summary["total_payment_allocations"]),
@@ -1535,7 +1997,7 @@ def create_vendor_report_workbook(
     filters: Mapping[str, Any] | None = None,
     validation_results: Mapping[str, Any] | None = None,
 ) -> Workbook:
-    """Create the eight-sheet reconciliation workbook, including empty datasets."""
+    """Create the six-sheet reconciliation workbook, including empty datasets."""
     source = datasets or {}
     validations = dict(
         validation_results
@@ -1551,11 +2013,6 @@ def create_vendor_report_workbook(
     workbook.remove(workbook.active)
     sheets = {name: workbook.create_sheet(name) for name in WORKBOOK_SHEETS}
     _write_summary(sheets["Summary"], summary_values, validations)
-    _write_detail_sheet(
-        sheets["Vendor Master"],
-        "Vendor Master",
-        cleaned["vendor_master"],
-    )
     _write_detail_sheet(sheets["Vendor Bills"], "Vendor Bills", cleaned["vendor_bills"])
     _write_detail_sheet(sheets["Vendor Payments"], "Vendor Payments", cleaned["vendor_payments"])
     _write_detail_sheet(
@@ -1573,35 +2030,24 @@ def create_vendor_report_workbook(
         "Reconciliation Results",
         cleaned["reconciliation_results"],
     )
-    _write_detail_sheet(
-        sheets["Exceptions - Review"],
-        "Exceptions - Review",
-        cleaned["exceptions"],
-    )
-    _write_detail_sheet(
-        sheets["Technical Audit"],
-        "Technical Audit",
-        cleaned["technical_audit"],
-    )
-
-    exceptions_sheet = sheets["Exceptions - Review"]
-    if len(cleaned["exceptions"]) > 0:
-        status_column = EXCEPTION_COLUMNS.index("Review Status") + 1
-        comment_column = EXCEPTION_COLUMNS.index("Reviewer Comment") + 1
-        last_row = len(cleaned["exceptions"]) + 3
+    reconciliation_sheet = sheets["Reconciliation Results"]
+    if len(cleaned["reconciliation_results"]) > 0:
+        status_column = RECONCILIATION_RESULT_COLUMNS.index("Review Status") + 1
+        comment_column = RECONCILIATION_RESULT_COLUMNS.index("Reviewer Comment") + 1
+        last_row = len(cleaned["reconciliation_results"]) + 3
         validation = DataValidation(
             type="list",
-            formula1='"Open,In Review,Resolved"',
+            formula1='"Pending,In Review,Resolved"',
             allow_blank=True,
         )
-        exceptions_sheet.add_data_validation(validation)
+        reconciliation_sheet.add_data_validation(validation)
         validation.add(
             f"{get_column_letter(status_column)}4:"
             f"{get_column_letter(status_column)}{last_row}"
         )
         for column in (status_column, comment_column):
             for row in range(4, last_row + 1):
-                exceptions_sheet.cell(row, column).font = Font(color="0000FF")
+                reconciliation_sheet.cell(row, column).font = Font(color="0000FF")
 
     for sheet_name in ("Vendor Bills", "Vendor Payments", "Reconciliation Results"):
         sheet = sheets[sheet_name]
@@ -1637,33 +2083,98 @@ def generate_vendor_transactions_report(
     reconciliation_status: str | None = None,
     bank_match_status: str | None = None,
     review_required: bool | None = None,
+    report_mode: str = REPORT_MODE_INPUT,
     destination_folder: str | Path | None = None,
     project_id: str | None = None,
     location: str | None = None,
     client: Any | None = None,
 ) -> dict[str, Any]:
-    """Fetch verified data, validate it, and create an in-memory workbook."""
-    datasets, metadata = fetch_vendor_report_data(
-        start_date=start_date,
-        end_date=end_date,
-        organization=organization,
-        vendor=vendor,
-        currency=currency,
-        source_bill_status=source_bill_status,
-        reconciliation_status=reconciliation_status,
-        bank_match_status=bank_match_status,
-        review_required=review_required,
-        project_id=project_id,
-        location=location,
-        client=client,
-    )
-    validations = validate_vendor_report_data(datasets, metadata["queries"])
-    workbook = create_vendor_report_workbook(
-        datasets,
-        filters=metadata["filters"],
-        validation_results=validations,
-    )
-    report_name = f"Vendor_Reconciliation_{start_date:%Y%m%d}_{end_date:%Y%m%d}.xlsx"
+    """Fetch, validate, and build the selected reconciliation workbook."""
+    if report_mode not in REPORT_MODES:
+        raise ValueError(f"Unsupported vendor report mode: {report_mode}")
+
+    if report_mode == REPORT_MODE_INPUT:
+        datasets, metadata = fetch_reconciliation_input_data(
+            start_date=start_date,
+            end_date=end_date,
+            organization=organization,
+            vendor=vendor,
+            currency=currency,
+            project_id=project_id,
+            location=location,
+            client=client,
+        )
+        validations = validate_reconciliation_input_data(
+            datasets,
+            metadata["queries"],
+        )
+        workbook = create_reconciliation_input_workbook(
+            datasets,
+            filters=metadata["filters"],
+            validation_results=validations,
+        )
+        report_name = (
+            f"Vendor_Reconciliation_Input_{start_date:%Y%m%d}_"
+            f"{end_date:%Y%m%d}.xlsx"
+        )
+        payment_batch = combine_zoho_payment_batch(
+            datasets["vendor_payments"],
+            datasets["payment_allocations"],
+        )
+        row_counts = {
+            "Summary": workbook["Summary"].max_row,
+            "Vendor Bills": len(datasets["vendor_bills"]),
+            "Zoho Payment Batch": len(payment_batch),
+            "Bank Transactions": len(datasets["bank_transactions"]),
+        }
+        summary = summarize_reconciliation_input(
+            datasets,
+            metadata["filters"],
+        )
+        message = "Reconciliation Input Data generated successfully."
+    else:
+        datasets, metadata = fetch_vendor_report_data(
+            start_date=start_date,
+            end_date=end_date,
+            organization=organization,
+            vendor=vendor,
+            currency=currency,
+            source_bill_status=source_bill_status,
+            reconciliation_status=reconciliation_status,
+            bank_match_status=bank_match_status,
+            review_required=review_required,
+            project_id=project_id,
+            location=location,
+            client=client,
+        )
+        validations = validate_vendor_report_data(datasets, metadata["queries"])
+        workbook = create_vendor_report_workbook(
+            datasets,
+            filters=metadata["filters"],
+            validation_results=validations,
+        )
+        report_name = (
+            f"Vendor_Reconciliation_Analysis_{start_date:%Y%m%d}_"
+            f"{end_date:%Y%m%d}.xlsx"
+        )
+        row_counts = {
+            sheet_name: (
+                workbook[sheet_name].max_row
+                if sheet_name == "Summary"
+                else len(datasets[dataset_name])
+            )
+            for sheet_name, dataset_name in [
+                ("Summary", "vendor_bills"),
+                ("Vendor Bills", "vendor_bills"),
+                ("Vendor Payments", "vendor_payments"),
+                ("Payment Allocations", "payment_allocations"),
+                ("Bank Transactions", "bank_transactions"),
+                ("Reconciliation Results", "reconciliation_results"),
+            ]
+        }
+        summary = summarize_vendor_report(datasets, metadata["filters"])
+        message = "Automated Reconciliation Analysis generated successfully."
+
     report_buffer = BytesIO()
     workbook.save(report_buffer)
     report_bytes = report_buffer.getvalue()
@@ -1674,38 +2185,20 @@ def generate_vendor_transactions_report(
         report_path = output_folder / report_name
         report_path.write_bytes(report_bytes)
 
-    row_counts = {
-        sheet_name: (
-            workbook[sheet_name].max_row
-            if sheet_name == "Summary"
-            else len(datasets[dataset_name])
-        )
-        for sheet_name, dataset_name in [
-            ("Summary", "vendor_bills"),
-            ("Vendor Master", "vendor_master"),
-            ("Vendor Bills", "vendor_bills"),
-            ("Vendor Payments", "vendor_payments"),
-            ("Payment Allocations", "payment_allocations"),
-            ("Bank Transactions", "bank_transactions"),
-            ("Reconciliation Results", "reconciliation_results"),
-            ("Exceptions - Review", "exceptions"),
-            ("Technical Audit", "technical_audit"),
-        ]
-    }
-    summary = summarize_vendor_report(datasets, metadata["filters"])
     return {
+        "report_mode": report_mode,
         "report_path": report_path,
         "report_name": report_name,
         "report_bytes": report_bytes,
         "row_counts": row_counts,
         "summary": summary,
         "validations": validations,
-        "bill_rows": len(datasets["vendor_bills"]),
-        "payment_rows": len(datasets["vendor_payments"]),
+        "bill_rows": len(datasets.get("vendor_bills", [])),
+        "payment_rows": len(datasets.get("vendor_payments", [])),
         "total_rows": sum(
             len(frame)
             for name, frame in datasets.items()
-            if name != "technical_audit"
+            if name in DATASET_COLUMNS or name in INPUT_DATASET_COLUMNS
         ),
-        "message": "Vendor Reconciliation Report generated successfully.",
+        "message": message,
     }
