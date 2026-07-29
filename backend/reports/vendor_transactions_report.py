@@ -26,11 +26,15 @@ from openpyxl.worksheet.datavalidation import DataValidation
 
 DEFAULT_PROJECT_ID = "internal-project-work-497507"
 DEFAULT_BIGQUERY_LOCATION = "asia-south1"
+BIGQUERY_QUERY_TIMEOUT_SECONDS = 120
+BIGQUERY_QUERY_MAX_ATTEMPTS = 2
 
 BILLS_VIEW = "finance_silver.fact_bills"
 PAYMENTS_VIEW = "finance_silver.fact_vendor_payments"
 ALLOCATIONS_VIEW = "finance_silver.bridge_vendor_payment_bill_allocations"
 BANK_VIEW = "finance_silver.fact_bank_transactions"
+BANK_STATEMENT_VIEW = "finance_silver.fact_bank_statement_lines"
+UPLOADS_TABLE = "finance_bronze.file_uploads"
 CONTACTS_VIEW = "finance_silver.dim_contacts"
 PAYMENT_MATCHES_VIEW = "finance_gold.vendor_payment_bank_matches"
 BILL_RECONCILIATION_VIEW = "finance_gold.vendor_bill_reconciliation"
@@ -57,7 +61,7 @@ INPUT_WORKBOOK_SHEETS = [
     "Summary",
     "Vendor Bills",
     "Zoho Payment Batch",
-    "Bank Transactions",
+    "Bank Statement",
 ]
 
 INPUT_VENDOR_BILL_COLUMNS = [
@@ -69,10 +73,16 @@ INPUT_VENDOR_BILL_COLUMNS = [
     "Bill Date",
     "Due Date",
     "Currency",
-    "Bill Amount",
+    "Taxable Amount",
+    "GST Amount",
+    "Bill Total",
     "Outstanding Balance",
     "Zoho Bill Status",
+    "In Selected Bill Period",
+    "Inclusion Reason",
 ]
+
+INPUT_VENDOR_BILL_SOURCE_COLUMNS = INPUT_VENDOR_BILL_COLUMNS[:-2]
 
 INPUT_VENDOR_PAYMENT_COLUMNS = [
     "Organization",
@@ -102,37 +112,58 @@ INPUT_PAYMENT_ALLOCATION_COLUMNS = [
 ]
 
 ZOHO_PAYMENT_BATCH_COLUMNS = [
-    *INPUT_VENDOR_PAYMENT_COLUMNS,
-    "Bill Payment ID",
+    "Organization",
+    "Vendor ID",
+    "Vendor Name",
+    "Payment ID",
+    "Payment Date",
+    "Payment Reference",
+    "Payment Amount",
     "Bill ID",
     "Bill Number",
     "Amount Applied",
+    "Unapplied Amount",
 ]
 
-INPUT_BANK_TRANSACTION_COLUMNS = [
+INPUT_BANK_STATEMENT_SOURCE_COLUMNS = [
     "Organization",
-    "Account Name",
-    "Transaction ID",
-    "Bank Transaction Leg Key",
+    "Bank Source",
+    "Upload ID",
+    "Source File",
     "Transaction Date",
-    "Transaction Type",
+    "Value Date",
+    "Narration",
     "Reference Number",
-    "Description",
-    "Debit/Credit",
+    "Debit Amount",
+    "Credit Amount",
+    "Signed Amount",
     "Direction",
     "Currency",
-    "Amount",
-    "Signed Amount",
-    "Status",
-    "Multi-Leg Transaction",
-    "Data Quality Status",
+    "Account Name",
+    "Masked Account Number",
+    "Statement Row ID",
+]
+
+MANUAL_REVIEW_BANK_COLUMNS = [
+    "Extracted Invoice Number",
+    "Invoice Reference Result",
+    "Matching Bill Number",
+    "Matching Bill ID",
+    "Possible Amount Pattern",
+    "Amount Difference",
+    "Manual Review Note",
+]
+
+INPUT_BANK_STATEMENT_COLUMNS = [
+    *INPUT_BANK_STATEMENT_SOURCE_COLUMNS,
+    *MANUAL_REVIEW_BANK_COLUMNS,
 ]
 
 INPUT_DATASET_COLUMNS = {
     "vendor_bills": INPUT_VENDOR_BILL_COLUMNS,
     "vendor_payments": INPUT_VENDOR_PAYMENT_COLUMNS,
     "payment_allocations": INPUT_PAYMENT_ALLOCATION_COLUMNS,
-    "bank_transactions": INPUT_BANK_TRANSACTION_COLUMNS,
+    "bank_statement": INPUT_BANK_STATEMENT_COLUMNS,
 }
 
 VENDOR_BILL_COLUMNS = [
@@ -275,6 +306,9 @@ DATE_COLUMNS = {
 }
 AMOUNT_COLUMNS = {
     "Bill Amount",
+    "Taxable Amount",
+    "GST Amount",
+    "Bill Total",
     "Outstanding Balance",
     "Payment Amount",
     "Total Payment Amount",
@@ -287,6 +321,9 @@ AMOUNT_COLUMNS = {
     "Signed Amount",
     "Source Outstanding Balance",
     "Bank Amount",
+    "Expected Payment After 2% TDS",
+    "Expected Payment After 10% TDS",
+    "Amount Difference",
 }
 TEXT_IDENTIFIER_COLUMNS = {
     "Vendor ID",
@@ -304,9 +341,17 @@ TEXT_IDENTIFIER_COLUMNS = {
     "Bank Transaction Leg Key",
     "Run ID",
     "Payment IDs",
+    "Extracted Invoice Number",
+    "Upload ID",
+    "Statement Row ID",
+    "Matching Bill ID",
+    "Matching Bill Number",
 }
 WRAP_COLUMNS = {
     "Vendor Name",
+    "Description",
+    "Narration",
+    "Manual Review Note",
     "Reconciliation Reason",
     "Bank Match Reason",
     "Reviewer Comment",
@@ -405,7 +450,9 @@ DISPLAY_COLUMN_MAPS = {
         "bill_date": "Bill Date",
         "due_date": "Due Date",
         "currency": "Currency",
-        "bill_amount": "Bill Amount",
+        "taxable_amount": "Taxable Amount",
+        "gst_amount": "GST Amount",
+        "bill_total": "Bill Total",
         "source_outstanding_balance": "Source Outstanding Balance",
         "source_bill_status": "Source Bill Status",
         "payment_count": "Payment Count",
@@ -438,7 +485,9 @@ INPUT_DISPLAY_COLUMN_MAPS = {
         "bill_date": "Bill Date",
         "due_date": "Due Date",
         "currency": "Currency",
-        "bill_amount": "Bill Amount",
+        "taxable_amount": "Taxable Amount",
+        "gst_amount": "GST Amount",
+        "bill_total": "Bill Total",
         "outstanding_balance": "Outstanding Balance",
         "zoho_bill_status": "Zoho Bill Status",
     },
@@ -467,23 +516,23 @@ INPUT_DISPLAY_COLUMN_MAPS = {
         "amount_applied": "Amount Applied",
         "allocation_key": "Allocation Key",
     },
-    "bank_transactions": {
+    "bank_statement": {
         "organization": "Organization",
-        "account_name": "Account Name",
-        "transaction_id": "Transaction ID",
-        "bank_transaction_leg_key": "Bank Transaction Leg Key",
+        "bank_source": "Bank Source",
+        "upload_id": "Upload ID",
+        "source_file": "Source File",
         "transaction_date": "Transaction Date",
-        "transaction_type": "Transaction Type",
+        "value_date": "Value Date",
+        "narration": "Narration",
         "reference_number": "Reference Number",
-        "description": "Description",
-        "debit_or_credit": "Debit/Credit",
+        "debit_amount": "Debit Amount",
+        "credit_amount": "Credit Amount",
+        "signed_amount": "Signed Amount",
         "direction": "Direction",
         "currency": "Currency",
-        "amount": "Amount",
-        "signed_amount": "Signed Amount",
-        "status": "Status",
-        "multi_leg_transaction": "Multi-Leg Transaction",
-        "data_quality_status": "Data Quality Status",
+        "account_name": "Account Name",
+        "masked_account_number": "Masked Account Number",
+        "statement_row_id": "Statement Row ID",
     },
 }
 
@@ -516,15 +565,48 @@ def _query_to_dataframe(
     query: str,
     parameters: list[Any] | None = None,
     location: str | None = None,
+    stage: str = "BigQuery query",
 ) -> pd.DataFrame:
     from google.cloud import bigquery
+    from google.api_core import exceptions as google_exceptions
 
     job_config = bigquery.QueryJobConfig(query_parameters=parameters or [])
-    result = client.query(
-        query,
-        job_config=job_config,
-        location=_bigquery_location(location),
-    ).result()
+    transient_errors = (
+        TimeoutError,
+        google_exceptions.DeadlineExceeded,
+        google_exceptions.InternalServerError,
+        google_exceptions.ServiceUnavailable,
+        google_exceptions.TooManyRequests,
+    )
+    result = None
+    for attempt in range(1, BIGQUERY_QUERY_MAX_ATTEMPTS + 1):
+        try:
+            result = client.query(
+                query,
+                job_config=job_config,
+                location=_bigquery_location(location),
+                timeout=BIGQUERY_QUERY_TIMEOUT_SECONDS,
+            ).result(timeout=BIGQUERY_QUERY_TIMEOUT_SECONDS)
+            break
+        except transient_errors as error:
+            if attempt == BIGQUERY_QUERY_MAX_ATTEMPTS:
+                raise RuntimeError(
+                    f"{stage} timed out or failed transiently after one retry: "
+                    f"{safe_exception_details(error)}"
+                ) from error
+        except Exception as error:
+            error_details = safe_exception_details(error)
+            if (
+                error.__class__.__name__ == "RefreshError"
+                or "reauthentication is needed" in error_details.lower()
+            ):
+                raise RuntimeError(
+                    f"{stage} failed because Google authentication expired. "
+                    "Run gcloud auth application-default login and try again."
+                ) from error
+            raise RuntimeError(f"{stage} failed: {error_details}") from error
+    if result is None:
+        raise RuntimeError(f"{stage} failed without returning a query result.")
     columns = [field.name for field in result.schema]
     return pd.DataFrame([dict(row.items()) for row in result], columns=columns)
 
@@ -539,6 +621,7 @@ def _query_parameters(
     reconciliation_status: str | None = None,
     bank_match_status: str | None = None,
     review_required: bool | None = None,
+    bank_upload_id: str | None = None,
 ) -> list[Any]:
     from google.cloud import bigquery
 
@@ -552,6 +635,7 @@ def _query_parameters(
         "reconciliation_status": ("STRING", reconciliation_status),
         "bank_match_status": ("STRING", bank_match_status),
         "review_required": ("BOOL", review_required),
+        "bank_upload_id": ("STRING", bank_upload_id),
     }
     return [
         bigquery.ScalarQueryParameter(name, value_type, value)
@@ -579,6 +663,11 @@ def build_reconciliation_input_queries(
     filters: Mapping[str, Any],
 ) -> dict[str, str]:
     """Build Silver-only queries for the manual-reconciliation input workbook."""
+    statement_organization = (
+        "@organization"
+        if filters.get("organization") is not None
+        else "CAST(NULL AS STRING)"
+    )
     bills_filter = _where(
         filters,
         {
@@ -614,8 +703,7 @@ def build_reconciliation_input_queries(
         {
             "start_date": "bank.transaction_date",
             "end_date": "bank.transaction_date",
-            "organization": "bank.source_org_key",
-            "currency": "bank.original_currency",
+            "bank_upload_id": "bank.upload_id",
         },
     )
     return {
@@ -629,12 +717,35 @@ def build_reconciliation_input_queries(
             bill.bill_date,
             bill.due_date,
             bill.original_currency AS currency,
-            bill.total_amount AS bill_amount,
+            bill.taxable_amount,
+            bill.tax_amount AS gst_amount,
+            bill.total_amount AS bill_total,
             bill.balance_amount AS outstanding_balance,
             bill.status AS zoho_bill_status
           FROM {_table_name(project_id, BILLS_VIEW)} bill
           {bills_filter}
           ORDER BY bill.bill_date DESC, bill.vendor_name, bill.bill_number
+        """,
+        "current_bills": f"""
+          SELECT DISTINCT
+            bill.source_org_key AS organization,
+            CAST(bill.vendor_id AS STRING) AS vendor_id,
+            bill.vendor_name,
+            CAST(bill.bill_id AS STRING) AS bill_id,
+            bill.bill_number,
+            bill.bill_date,
+            bill.due_date,
+            bill.original_currency AS currency,
+            bill.taxable_amount,
+            bill.tax_amount AS gst_amount,
+            bill.total_amount AS bill_total,
+            bill.balance_amount AS outstanding_balance,
+            bill.status AS zoho_bill_status
+          FROM {_table_name(project_id, BILLS_VIEW)} bill
+          INNER JOIN {_table_name(project_id, ALLOCATIONS_VIEW)} allocation
+            ON allocation.source_org_key = bill.source_org_key
+           AND CAST(allocation.bill_id AS STRING) = CAST(bill.bill_id AS STRING)
+          {allocations_filter}
         """,
         "vendor_payments": f"""
           SELECT
@@ -670,29 +781,63 @@ def build_reconciliation_input_queries(
           ORDER BY allocation.payment_date DESC,
                    allocation.payment_id, allocation.bill_id
         """,
-        "bank_transactions": f"""
+        "bank_statement": f"""
+          WITH upload_metadata AS (
+            SELECT upload_id, original_file_name
+            FROM {_table_name(project_id, UPLOADS_TABLE)}
+            WHERE file_type = 'bank_statement'
+            QUALIFY ROW_NUMBER() OVER (
+              PARTITION BY upload_id ORDER BY uploaded_at DESC
+            ) = 1
+          )
           SELECT
-            bank.source_org_key AS organization,
-            bank.account_name,
-            CAST(bank.transaction_id AS STRING) AS transaction_id,
-            CAST(bank.bank_transaction_leg_key AS STRING)
-              AS bank_transaction_leg_key,
+            {statement_organization} AS organization,
+            COALESCE(NULLIF(bank.bank_name, ''), 'Uploaded Bank Statement')
+              AS bank_source,
+            CAST(bank.upload_id AS STRING) AS upload_id,
+            metadata.original_file_name AS source_file,
             bank.transaction_date,
-            bank.transaction_type,
+            bank.value_date,
+            bank.narration,
             bank.reference_number,
-            bank.description,
-            bank.debit_or_credit,
-            bank.transaction_direction AS direction,
-            bank.original_currency AS currency,
-            bank.transaction_amount AS amount,
-            bank.signed_amount,
-            bank.status,
-            bank.multi_leg_transaction,
-            bank.bank_data_quality_status AS data_quality_status
-          FROM {_table_name(project_id, BANK_VIEW)} bank
+            bank.debit_amount,
+            bank.credit_amount,
+            COALESCE(bank.credit_amount, 0) - COALESCE(bank.debit_amount, 0)
+              AS signed_amount,
+            CASE
+              WHEN COALESCE(bank.debit_amount, 0) > 0 THEN 'Outgoing'
+              WHEN COALESCE(bank.credit_amount, 0) > 0 THEN 'Incoming'
+              ELSE 'Other'
+            END AS direction,
+            CAST(NULL AS STRING) AS currency,
+            bank.bank_name AS account_name,
+            CASE
+              WHEN NULLIF(TRIM(bank.account_number_masked), '') IS NULL
+                OR UPPER(TRIM(bank.account_number_masked)) IN (
+                  'NOT PROVIDED', 'N/A', 'NA', 'UNKNOWN'
+                )
+              THEN NULL
+              ELSE CONCAT(
+                REPEAT(
+                  '*',
+                  GREATEST(
+                    LENGTH(REGEXP_REPLACE(bank.account_number_masked, r'[^A-Za-z0-9]', '')) - 4,
+                    0
+                  )
+                ),
+                RIGHT(REGEXP_REPLACE(bank.account_number_masked, r'[^A-Za-z0-9]', ''), 4)
+              )
+            END AS masked_account_number,
+            CAST(
+              COALESCE(
+                bank.bank_line_id,
+                CONCAT(bank.upload_id, '-', CAST(bank.raw_row_number AS STRING))
+              ) AS STRING
+            ) AS statement_row_id
+          FROM {_table_name(project_id, BANK_STATEMENT_VIEW)} bank
+          LEFT JOIN upload_metadata metadata USING (upload_id)
           {bank_filter}
-          ORDER BY bank.transaction_date DESC, bank.transaction_id,
-                   bank.account_name, bank.debit_or_credit
+          ORDER BY bank.transaction_date, bank.raw_row_number
         """,
     }
 
@@ -1000,6 +1145,25 @@ def safe_exception_details(error: Exception, max_length: int = 4000) -> str:
     return message[:max_length]
 
 
+def user_facing_report_error(error: Exception) -> str:
+    """Return a concise, actionable report-generation error for the app."""
+    details = safe_exception_details(error)
+    lowered = details.lower()
+    if "google authentication expired" in lowered or "reauthentication is needed" in lowered:
+        return (
+            "Google authentication has expired. Run "
+            "`gcloud auth application-default login`, then try again."
+        )
+    if "after one retry" in lowered or "timed out" in lowered:
+        return (
+            "A BigQuery report query timed out after one retry. "
+            "Please try again; technical details identify the failed stage."
+        )
+    if isinstance(error, ValueError) and "start date" in lowered:
+        return "Start date must be on or before end date."
+    return "The vendor report could not be generated. Please try again."
+
+
 def _rename_query_columns(dataframe: pd.DataFrame, dataset_name: str) -> pd.DataFrame:
     mapping = DISPLAY_COLUMN_MAPS[dataset_name]
     return dataframe.rename(columns=mapping).reindex(columns=list(mapping.values()))
@@ -1013,12 +1177,95 @@ def _rename_input_query_columns(
     return dataframe.rename(columns=mapping).reindex(columns=list(mapping.values()))
 
 
+def fetch_bank_statement_upload_options(
+    start_date: date,
+    end_date: date,
+    project_id: str | None = None,
+    location: str | None = None,
+    client: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Return safe upload choices with coverage information for the UI."""
+    from google.cloud import bigquery
+
+    if start_date > end_date:
+        raise ValueError("Start date must be on or before end date.")
+    resolved_project_id = _project_id(project_id)
+    resolved_location = _bigquery_location(location)
+    query_client = client or bigquery.Client(
+        project=resolved_project_id,
+        location=resolved_location,
+    )
+    query = f"""
+      WITH metadata AS (
+        SELECT
+          upload_id,
+          original_file_name,
+          uploaded_at
+        FROM {_table_name(resolved_project_id, UPLOADS_TABLE)}
+        WHERE file_type = 'bank_statement'
+          AND COALESCE(parse_status, 'success') = 'success'
+        QUALIFY ROW_NUMBER() OVER (
+          PARTITION BY upload_id ORDER BY uploaded_at DESC
+        ) = 1
+      )
+      SELECT
+        CAST(lines.upload_id AS STRING) AS upload_id,
+        metadata.original_file_name AS source_file,
+        COALESCE(NULLIF(lines.bank_name, ''), 'Uploaded Bank Statement')
+          AS bank_source,
+        MIN(lines.transaction_date) AS coverage_start_date,
+        MAX(lines.transaction_date) AS coverage_end_date,
+        COUNT(*) AS row_count,
+        COUNTIF(
+          lines.transaction_date BETWEEN @start_date AND @end_date
+        ) AS period_row_count,
+        COUNTIF(
+          lines.transaction_date BETWEEN @start_date AND @end_date
+          AND COALESCE(lines.debit_amount, 0) > 0
+        ) AS period_debit_count,
+        MAX(metadata.uploaded_at) AS uploaded_at
+      FROM {_table_name(resolved_project_id, BANK_STATEMENT_VIEW)} lines
+      LEFT JOIN metadata USING (upload_id)
+      GROUP BY lines.upload_id, metadata.original_file_name, bank_source
+      ORDER BY uploaded_at DESC, upload_id DESC
+    """
+    dataframe = _query_to_dataframe(
+        query_client,
+        query,
+        _query_parameters(start_date=start_date, end_date=end_date),
+        location=resolved_location,
+        stage="Bank statement upload discovery",
+    )
+    return dataframe.to_dict(orient="records")
+
+
+def recommend_bank_statement_upload(
+    uploads: list[Mapping[str, Any]],
+    start_date: date,
+    end_date: date,
+) -> str | None:
+    """Recommend one full-period upload; never merge or fall back to latest."""
+    covering = [
+        upload
+        for upload in uploads
+        if upload.get("coverage_start_date") is not None
+        and upload.get("coverage_end_date") is not None
+        and upload["coverage_start_date"] <= start_date
+        and upload["coverage_end_date"] >= end_date
+        and int(upload.get("period_row_count") or 0) > 0
+    ]
+    if not covering:
+        return None
+    return str(covering[0]["upload_id"])
+
+
 def fetch_reconciliation_input_data(
     start_date: date,
     end_date: date,
     organization: str | None = None,
     vendor: str | None = None,
     currency: str | None = None,
+    bank_upload_id: str | None = None,
     project_id: str | None = None,
     location: str | None = None,
     client: Any | None = None,
@@ -1028,6 +1275,10 @@ def fetch_reconciliation_input_data(
 
     if start_date > end_date:
         raise ValueError("Start date must be on or before end date.")
+    if not str(bank_upload_id or "").strip():
+        raise VendorReportValidationError(
+            "Select one uploaded bank statement before generating the workbook."
+        )
     resolved_project_id = _project_id(project_id)
     resolved_location = _bigquery_location(location)
     query_client = client or bigquery.Client(
@@ -1040,13 +1291,39 @@ def fetch_reconciliation_input_data(
         "organization": organization,
         "vendor": vendor,
         "currency": currency,
+        "bank_upload_id": str(bank_upload_id).strip(),
     }
+    upload_options = fetch_bank_statement_upload_options(
+        start_date,
+        end_date,
+        project_id=resolved_project_id,
+        location=resolved_location,
+        client=query_client,
+    )
+    selected_upload = next(
+        (
+            option
+            for option in upload_options
+            if str(option.get("upload_id")) == filters["bank_upload_id"]
+        ),
+        None,
+    )
+    if selected_upload is None:
+        raise VendorReportValidationError(
+            "The selected bank statement upload no longer exists."
+        )
+    if int(selected_upload.get("period_row_count") or 0) == 0:
+        raise VendorReportValidationError(
+            "The selected bank statement has no rows in the requested report period."
+        )
     parameters = _query_parameters(**filters)
     queries = build_reconciliation_input_queries(resolved_project_id, filters)
     if any("finance_silver.fact_transactions" in query for query in queries.values()):
         raise VendorReportValidationError("Legacy fact_transactions query is prohibited.")
-    datasets = {
-        name: _rename_input_query_columns(
+    datasets = {}
+    for name, query in queries.items():
+        dataset_name = "vendor_bills" if name == "current_bills" else name
+        datasets[name] = _rename_input_query_columns(
             _query_to_dataframe(
                 query_client,
                 query,
@@ -1056,16 +1333,16 @@ def fetch_reconciliation_input_data(
                     if f"@{parameter.name}" in query
                 ],
                 location=resolved_location,
+                stage=f"Reconciliation input query '{name}'",
             ),
-            name,
+            dataset_name,
         )
-        for name, query in queries.items()
-    }
     return datasets, {
         "project_id": resolved_project_id,
         "location": resolved_location,
         "queries": queries,
         "filters": filters,
+        "bank_upload": selected_upload,
     }
 
 
@@ -1120,6 +1397,7 @@ def fetch_vendor_report_data(
                     if f"@{parameter.name}" in query
                 ],
                 location=resolved_location,
+                stage=f"Automated analysis query '{name}'",
             ),
             name,
         )
@@ -1175,6 +1453,7 @@ def fetch_vendor_filter_options(
         query_client,
         query,
         location=resolved_location,
+        stage="Vendor filter-options query",
     )
     output: dict[str, list[Any]] = {
         "organizations": [],
@@ -1250,7 +1529,321 @@ def combine_zoho_payment_batch(
         how="left",
         validate="one_to_many",
     )
+    batch["Payment Amount"] = batch["Total Payment Amount"]
     return batch.reindex(columns=ZOHO_PAYMENT_BATCH_COLUMNS)
+
+
+def _select_reconciliation_input_bills(
+    datasets: Mapping[str, pd.DataFrame],
+) -> pd.DataFrame:
+    """Add allocation-linked current bills without duplicating period bills."""
+    supplied_bills = datasets.get("vendor_bills")
+    if (
+        isinstance(supplied_bills, pd.DataFrame)
+        and "In Selected Bill Period" in supplied_bills.columns
+        and supplied_bills["In Selected Bill Period"].notna().any()
+    ):
+        return _clean_dataframe(supplied_bills, INPUT_VENDOR_BILL_COLUMNS)
+    period_bills = _clean_dataframe(
+        supplied_bills,
+        INPUT_VENDOR_BILL_SOURCE_COLUMNS,
+    ).assign(
+        **{
+            "In Selected Bill Period": "Yes",
+            "Inclusion Reason": "Bill Date in Selected Period",
+        }
+    )
+    current_bills = _clean_dataframe(
+        datasets.get("current_bills", datasets.get("vendor_bills")),
+        INPUT_VENDOR_BILL_SOURCE_COLUMNS,
+    )
+    allocations = _clean_dataframe(
+        datasets.get("payment_allocations"),
+        INPUT_PAYMENT_ALLOCATION_COLUMNS,
+    )
+    valid_allocation_keys = allocations[
+        allocations["Bill ID"].notna()
+        & allocations["Bill ID"].astype(str).ne("")
+    ][["Organization", "Bill ID"]].drop_duplicates()
+    linked_bills = current_bills.merge(
+        valid_allocation_keys,
+        on=["Organization", "Bill ID"],
+        how="inner",
+    )
+    period_keys = period_bills[["Organization", "Bill ID"]].drop_duplicates().assign(
+        _in_period=True
+    )
+    linked_bills = linked_bills.merge(
+        period_keys,
+        on=["Organization", "Bill ID"],
+        how="left",
+    )
+    linked_bills = (
+        linked_bills[linked_bills["_in_period"].isna()]
+        .drop(columns="_in_period")
+        .drop_duplicates(["Organization", "Bill ID"])
+        .assign(
+            **{
+                "In Selected Bill Period": "No",
+                "Inclusion Reason": "Linked to Payment in Selected Period",
+            }
+        )
+    )
+    return pd.concat(
+        [period_bills, linked_bills],
+        ignore_index=True,
+    ).reindex(columns=INPUT_VENDOR_BILL_COLUMNS)
+
+
+def _older_linked_bills_message(count: int) -> str:
+    noun = "bill was" if count == 1 else "bills were"
+    pronoun = "it" if count == 1 else "them"
+    return (
+        f"{count} older {noun} included because payments allocated to "
+        f"{pronoun} fall within the selected report period."
+    )
+
+
+def _invoice_reference_pattern(value: Any) -> re.Pattern[str] | None:
+    """Return a bounded, punctuation-tolerant pattern for a known bill number."""
+    if value is None or pd.isna(value):
+        return None
+    tokens = re.findall(r"[A-Z0-9]+", str(value).upper())
+    if not tokens or sum(len(token) for token in tokens) < 2:
+        return None
+    expression = r"[\s./_#-]*".join(re.escape(token) for token in tokens)
+    return re.compile(rf"(?<![A-Z0-9]){expression}(?![A-Z0-9])", re.IGNORECASE)
+
+
+def _money_value(value: Any) -> float | None:
+    numeric = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
+    return None if pd.isna(numeric) else float(numeric)
+
+
+def _is_high_specificity_bill_number(value: Any) -> bool:
+    normalized = re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+    if not normalized or normalized.isdigit() and len(normalized) < 5:
+        return False
+    if normalized.isdigit() and len(normalized) == 4 and 1900 <= int(normalized) <= 2100:
+        return False
+    month_names = (
+        "JAN(?:UARY)?|FEB(?:RUARY)?|MAR(?:CH)?|APR(?:IL)?|MAY|"
+        "JUN(?:E)?|JUL(?:Y)?|AUG(?:UST)?|SEP(?:T(?:EMBER)?)?|"
+        "OCT(?:OBER)?|NOV(?:EMBER)?|DEC(?:EMBER)?"
+    )
+    if re.fullmatch(rf"(?:{month_names})\d{{2,4}}", normalized):
+        return False
+    if re.fullmatch(rf"\d{{2,4}}(?:{month_names})", normalized):
+        return False
+    return len(normalized) >= 5
+
+
+def _normalized_reference(value: Any) -> str:
+    return re.sub(r"[^A-Z0-9]+", "", str(value or "").upper())
+
+
+def prepare_manual_review_bank_statement(
+    bills: pd.DataFrame,
+    bank_statement: pd.DataFrame,
+) -> pd.DataFrame:
+    """Add conservative, non-final invoice and amount review suggestions."""
+    bill_rows = _clean_dataframe(bills, INPUT_VENDOR_BILL_COLUMNS)
+    statement = _clean_dataframe(
+        bank_statement,
+        INPUT_BANK_STATEMENT_SOURCE_COLUMNS,
+    ).reset_index(drop=True)
+    for column in MANUAL_REVIEW_BANK_COLUMNS:
+        statement[column] = None
+    if statement.empty:
+        return statement.reindex(columns=INPUT_BANK_STATEMENT_COLUMNS)
+
+    candidates: list[dict[str, Any]] = []
+    for _, bill in bill_rows.iterrows():
+        pattern = _invoice_reference_pattern(bill["Bill Number"])
+        if pattern is None:
+            continue
+        candidates.append(
+            {
+                "pattern": pattern,
+                "normalized": _normalized_reference(bill["Bill Number"]),
+                "high_specificity": _is_high_specificity_bill_number(
+                    bill["Bill Number"]
+                ),
+                "organization": str(bill["Organization"] or ""),
+                "bill_id": str(bill["Bill ID"] or ""),
+                "bill_number": str(bill["Bill Number"]),
+                "currency": str(bill["Currency"] or ""),
+                "taxable_amount": _money_value(bill["Taxable Amount"]),
+                "bill_total": _money_value(bill["Bill Total"]),
+            }
+        )
+
+    unique_matches: dict[Any, dict[str, Any]] = {}
+    for index, bank in statement.iterrows():
+        debit_amount = _money_value(bank["Debit Amount"])
+        signed_amount = _money_value(bank["Signed Amount"])
+        if not (
+            (debit_amount is not None and debit_amount > 0)
+            or (signed_amount is not None and signed_amount < 0)
+        ):
+            statement.at[index, "Invoice Reference Result"] = "No Invoice Reference"
+            statement.at[index, "Possible Amount Pattern"] = (
+                "No Unique Invoice Reference"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Invoice helpers are evaluated only for outgoing debit rows."
+            )
+            continue
+        search_text = " ".join(
+            str(value)
+            for value in (bank["Narration"], bank["Reference Number"])
+            if value is not None and not pd.isna(value)
+        )
+        normalized_text = _normalized_reference(search_text)
+        matched = []
+        for item in candidates:
+            exact_token = bool(item["pattern"].search(search_text))
+            embedded = (
+                len(item["normalized"]) >= 6
+                and item["normalized"] in normalized_text
+            )
+            if exact_token or embedded:
+                matched.append(item)
+        matched = list(
+            {
+                (item["bill_id"], item["bill_number"]): item
+                for item in matched
+            }.values()
+        )
+        if not matched:
+            statement.at[index, "Invoice Reference Result"] = "No Invoice Reference"
+            statement.at[index, "Possible Amount Pattern"] = (
+                "No Unique Invoice Reference"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "No conservative invoice reference found."
+            )
+            continue
+
+        high_confidence = [item for item in matched if item["high_specificity"]]
+        invoice_numbers = sorted({item["bill_number"] for item in matched})
+        statement.at[index, "Extracted Invoice Number"] = "; ".join(invoice_numbers)
+        if len(high_confidence) > 1:
+            statement.at[index, "Invoice Reference Result"] = "Ambiguous Reference"
+            statement.at[index, "Possible Amount Pattern"] = (
+                "No Unique Invoice Reference"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Multiple high-confidence bill references found; review manually."
+            )
+            continue
+        if not high_confidence:
+            statement.at[index, "Invoice Reference Result"] = (
+                "Low-Specificity Candidate"
+            )
+            statement.at[index, "Possible Amount Pattern"] = (
+                "No Unique Invoice Reference"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Only short, date-like, or month-period bill references were found."
+            )
+            continue
+
+        bill = high_confidence[0]
+        statement.at[index, "Invoice Reference Result"] = (
+            "Unique High-Confidence Reference"
+        )
+        statement.at[index, "Matching Bill Number"] = bill["bill_number"]
+        statement.at[index, "Matching Bill ID"] = bill["bill_id"]
+        unique_matches[index] = bill
+        taxable_amount = bill["taxable_amount"]
+        bill_total = bill["bill_total"]
+        if taxable_amount is None or bill_total is None or debit_amount is None:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Amount Difference - Review Required"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Invoice reference found; bill or bank amount is incomplete."
+            )
+            continue
+
+        expected_2 = round(bill_total - taxable_amount * 0.02, 2)
+        expected_10 = round(bill_total - taxable_amount * 0.10, 2)
+        comparisons = {
+            "bill total": debit_amount - bill_total,
+            "2% TDS": debit_amount - expected_2,
+            "10% TDS": debit_amount - expected_10,
+        }
+        closest = min(comparisons, key=lambda name: abs(comparisons[name]))
+        statement.at[index, "Amount Difference"] = round(comparisons[closest], 2)
+        if abs(comparisons["bill total"]) <= 0.01:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Exact Invoice Total Candidate"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Exact invoice-total candidate; finance review required."
+            )
+        elif abs(comparisons["2% TDS"]) <= 0.01:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Possible 2% TDS Candidate"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Possible 2% TDS candidate; finance review required."
+            )
+        elif abs(comparisons["10% TDS"]) <= 0.01:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Possible 10% TDS Candidate"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Possible 10% TDS candidate; finance review required."
+            )
+        else:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Amount Difference - Review Required"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                "Unique invoice reference found; amount difference requires review."
+            )
+
+    split_groups: dict[str, list[Any]] = {}
+    for index, bill in unique_matches.items():
+        split_groups.setdefault(bill["bill_id"], []).append(index)
+    for indexes in split_groups.values():
+        if len(indexes) < 2:
+            continue
+        bill = unique_matches[indexes[0]]
+        taxable_amount = bill["taxable_amount"]
+        bill_total = bill["bill_total"]
+        debit_total = sum(
+            _money_value(statement.at[index, "Debit Amount"]) or 0
+            for index in indexes
+        )
+        if taxable_amount is None or bill_total is None:
+            continue
+        expected = {
+            "bill total": bill_total,
+            "2% TDS": round(bill_total - taxable_amount * 0.02, 2),
+            "10% TDS": round(bill_total - taxable_amount * 0.10, 2),
+        }
+        split_match = next(
+            (
+                label
+                for label, amount in expected.items()
+                if abs(debit_total - amount) <= 0.01
+            ),
+            None,
+        )
+        if split_match is None:
+            continue
+        for index in indexes:
+            statement.at[index, "Possible Amount Pattern"] = (
+                "Possible Split Payment - Review Required"
+            )
+            statement.at[index, "Manual Review Note"] = (
+                f"Possible split-payment case; combined debits match {split_match}."
+            )
+
+    return statement.reindex(columns=INPUT_BANK_STATEMENT_COLUMNS)
 
 
 def validate_reconciliation_input_data(
@@ -1262,6 +1855,10 @@ def validate_reconciliation_input_data(
         datasets.get("vendor_bills"),
         INPUT_VENDOR_BILL_COLUMNS,
     )
+    current_bills = _clean_dataframe(
+        datasets.get("current_bills", datasets.get("vendor_bills")),
+        INPUT_VENDOR_BILL_SOURCE_COLUMNS,
+    )
     payments = _clean_dataframe(
         datasets.get("vendor_payments"),
         INPUT_VENDOR_PAYMENT_COLUMNS,
@@ -1270,9 +1867,9 @@ def validate_reconciliation_input_data(
         datasets.get("payment_allocations"),
         INPUT_PAYMENT_ALLOCATION_COLUMNS,
     )
-    banks = _clean_dataframe(
-        datasets.get("bank_transactions"),
-        INPUT_BANK_TRANSACTION_COLUMNS,
+    statement = _clean_dataframe(
+        datasets.get("bank_statement"),
+        INPUT_BANK_STATEMENT_COLUMNS,
     )
 
     allocation_exceeds_payment = 0
@@ -1313,17 +1910,15 @@ def validate_reconciliation_input_data(
         )
 
     missing_allocation_bill_ids = 0
-    if not allocations.empty and not bills.empty:
-        bill_orgs = set(bills["Organization"].dropna().astype(str))
+    if not allocations.empty:
         checkable_allocations = allocations[
-            allocations["Organization"].astype(str).isin(bill_orgs)
-            & allocations["Bill ID"].notna()
+            allocations["Bill ID"].notna()
             & allocations["Bill ID"].astype(str).ne("")
         ]
         if not checkable_allocations.empty:
-            bill_keys = bills[["Organization", "Bill ID"]].drop_duplicates().assign(
-                _bill_exists=True
-            )
+            bill_keys = current_bills[
+                ["Organization", "Bill ID"]
+            ].drop_duplicates().assign(_bill_exists=True)
             bill_comparison = checkable_allocations.merge(
                 bill_keys,
                 on=["Organization", "Bill ID"],
@@ -1342,6 +1937,55 @@ def validate_reconciliation_input_data(
             "finance_silver.fact_journal",
         )
     )
+    selected_upload_count = int(statement["Upload ID"].dropna().astype(str).nunique())
+    matching_ids = statement[
+        statement["Matching Bill ID"].notna()
+        & statement["Matching Bill ID"].astype(str).ne("")
+    ]
+    missing_matching_bill_ids = int(
+        (~matching_ids["Matching Bill ID"].isin(bills["Bill ID"])).sum()
+    )
+    non_unique_with_bill_id = int(
+        (
+            statement["Invoice Reference Result"].ne(
+                "Unique High-Confidence Reference"
+            )
+            & statement["Matching Bill ID"].notna()
+            & statement["Matching Bill ID"].astype(str).ne("")
+        ).sum()
+    )
+    no_unique_reference = statement["Invoice Reference Result"].ne(
+        "Unique High-Confidence Reference"
+    )
+    amount_helpers_without_unique_reference = int(
+        (
+            no_unique_reference
+            & (
+                statement["Amount Difference"].notna()
+                | statement["Possible Amount Pattern"].isin(
+                    [
+                        "Exact Invoice Total Candidate",
+                        "Possible 2% TDS Candidate",
+                        "Possible 10% TDS Candidate",
+                        "Possible Split Payment - Review Required",
+                        "Amount Difference - Review Required",
+                    ]
+                )
+            )
+        ).sum()
+    )
+    unmasked_account_numbers = int(
+        statement["Masked Account Number"]
+        .fillna("")
+        .astype(str)
+        .map(
+            lambda value: bool(
+                len(re.sub(r"[^A-Za-z0-9]", "", value)) > 4
+                and "*" not in value
+            )
+        )
+        .sum()
+    )
     checks = {
         "duplicate_bill_ids": _duplicate_count(
             bills,
@@ -1355,28 +1999,68 @@ def validate_reconciliation_input_data(
             allocations,
             ["Organization", "Allocation Key"],
         ),
-        "duplicate_bank_transaction_leg_keys": _duplicate_count(
-            banks,
-            ["Bank Transaction Leg Key"],
+        "duplicate_statement_row_keys": _duplicate_count(
+            statement,
+            ["Statement Row ID"],
+        ),
+        "selected_bank_upload_count": selected_upload_count,
+        "statement_rows_present": not statement.empty,
+        "matching_bill_ids_missing_from_exported_bills": missing_matching_bill_ids,
+        "non_unique_references_with_matching_bill_id": non_unique_with_bill_id,
+        "amount_helpers_without_unique_reference": (
+            amount_helpers_without_unique_reference
+        ),
+        "unmasked_account_numbers": unmasked_account_numbers,
+        "input_query_uses_uploaded_statement": (
+            not queries or BANK_STATEMENT_VIEW.lower() in query_text
+        ),
+        "input_query_mislabeled_zoho_bank_legs": (
+            bool(not queries or BANK_VIEW.lower() not in query_text)
         ),
         "allocations_exceeding_payment": allocation_exceeds_payment,
         "allocation_payment_ids_missing_from_vendor_payments": (
             missing_allocation_payment_ids
         ),
         "allocation_bill_ids_missing_from_bills": missing_allocation_bill_ids,
+        "older_linked_bills_included": int(
+            bills["In Selected Bill Period"].eq("No").sum()
+        ),
         "legacy_fact_transactions_queries": legacy_query_count,
         "journal_queries_used_as_vendor_payments": journal_query_count,
         "organizations_kept_separate": True,
         "currency_totals_separated": True,
     }
+    checks["informational_warnings"] = (
+        [
+            _older_linked_bills_message(
+                checks["older_linked_bills_included"]
+            )
+        ]
+        if checks["older_linked_bills_included"]
+        else []
+    )
+    non_blocking_checks = {
+        "older_linked_bills_included",
+        "informational_warnings",
+    }
+    checks["selected_bank_upload_count"] = (
+        0 if selected_upload_count == 1 else selected_upload_count or -1
+    )
     failures = {
         name: value
         for name, value in checks.items()
+        if name not in non_blocking_checks
         if (isinstance(value, bool) and not value)
         or (not isinstance(value, bool) and value != 0)
     }
     if failures:
         details = ", ".join(f"{name}={value}" for name, value in failures.items())
+        if missing_allocation_bill_ids:
+            raise VendorReportValidationError(
+                "Workbook generation stopped because one or more payment "
+                "allocations refer to bills that are missing from the current "
+                f"bills dataset. {details}"
+            )
         raise VendorReportValidationError(
             "Reconciliation input workbook blocked by validation failure: "
             f"{details}"
@@ -1619,17 +2303,18 @@ def _write_detail_sheet(
 def summarize_reconciliation_input(
     datasets: Mapping[str, pd.DataFrame],
     filters: Mapping[str, Any] | None = None,
+    bank_upload: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Summarize source records without producing reconciliation conclusions."""
     bills = datasets.get("vendor_bills", pd.DataFrame())
     payments = datasets.get("vendor_payments", pd.DataFrame())
     allocations = datasets.get("payment_allocations", pd.DataFrame())
-    banks = datasets.get("bank_transactions", pd.DataFrame())
+    statement = datasets.get("bank_statement", pd.DataFrame())
     selected_filters = filters or {}
     organizations = sorted(
         {
             str(value)
-            for frame in (bills, payments, banks)
+            for frame in (bills, payments)
             if "Organization" in frame
             for value in frame["Organization"].dropna()
         }
@@ -1637,7 +2322,7 @@ def summarize_reconciliation_input(
     currencies = sorted(
         {
             str(value)
-            for frame in (bills, payments, banks)
+            for frame in (bills, payments, statement)
             if "Currency" in frame
             for value in frame["Currency"].dropna()
         }
@@ -1652,12 +2337,17 @@ def summarize_reconciliation_input(
             on=["Organization", "Payment ID"],
             how="inner",
         )
-        bank_rows = banks[banks["Currency"].astype(str).eq(currency)]
+        bank_rows = statement[
+            statement.get(
+                "Currency",
+                pd.Series(index=statement.index, dtype="object"),
+            ).astype(str).eq(currency)
+        ]
         currency_rows.append(
             {
                 "currency": currency,
                 "bill_count": len(bill_rows),
-                "bill_total": float(_numeric(bill_rows["Bill Amount"]).sum()),
+                "bill_total": float(_numeric(bill_rows["Bill Total"]).sum()),
                 "payment_count": len(payment_rows),
                 "payment_total": float(
                     _numeric(payment_rows["Total Payment Amount"]).sum()
@@ -1667,19 +2357,113 @@ def summarize_reconciliation_input(
                     _numeric(allocation_rows["Amount Applied"]).sum()
                 ),
                 "bank_leg_count": len(bank_rows),
-                "bank_total": float(_numeric(bank_rows["Amount"]).sum()),
+                "bank_total": float(_numeric(bank_rows["Debit Amount"]).sum()),
             }
         )
+    older_linked_bill_count = int(
+        bills.get(
+            "In Selected Bill Period",
+            pd.Series(dtype="object"),
+        ).eq("No").sum()
+    )
+    debit_rows = statement[
+        _numeric(
+            statement.get(
+                "Debit Amount",
+                pd.Series(index=statement.index, dtype="object"),
+            )
+        ).gt(0)
+    ]
+    reference_results = debit_rows.get(
+        "Invoice Reference Result",
+        pd.Series(index=debit_rows.index, dtype="object"),
+    )
+    amount_patterns = debit_rows.get(
+        "Possible Amount Pattern",
+        pd.Series(index=debit_rows.index, dtype="object"),
+    )
+    upload_metadata = dict(bank_upload or {})
+    if not upload_metadata and not statement.empty:
+        def first_nonblank(column: str) -> Any:
+            values = statement[column].dropna().astype(str)
+            values = values[values.str.strip().ne("")]
+            return values.iloc[0] if not values.empty else None
+
+        upload_metadata = {
+            "upload_id": first_nonblank("Upload ID"),
+            "source_file": first_nonblank("Source File"),
+            "bank_source": first_nonblank("Bank Source"),
+            "coverage_start_date": statement["Transaction Date"].min(),
+            "coverage_end_date": statement["Transaction Date"].max(),
+        }
     return {
         "report_start_date": selected_filters.get("start_date"),
         "report_end_date": selected_filters.get("end_date"),
         "organizations": organizations,
+        "bills_in_selected_period": int(
+            bills.get(
+                "In Selected Bill Period",
+                pd.Series("Yes", index=bills.index, dtype="object"),
+            ).eq("Yes").sum()
+        ),
+        "older_linked_bills_included": older_linked_bill_count,
+        "total_bill_rows_exported": len(bills),
         "bill_record_count": len(bills),
-        "vendor_payment_count": len(payments),
+        "vendor_payment_count": len(
+            payments[["Organization", "Payment ID"]].drop_duplicates()
+        ),
         "payment_allocation_count": len(allocations),
-        "bank_transaction_leg_count": len(banks),
+        "selected_bank_source": upload_metadata.get("bank_source"),
+        "selected_source_file": upload_metadata.get("source_file"),
+        "selected_upload_id_suffix": str(
+            upload_metadata.get("upload_id") or ""
+        )[-4:],
+        "statement_coverage_start_date": upload_metadata.get(
+            "coverage_start_date"
+        ),
+        "statement_coverage_end_date": upload_metadata.get("coverage_end_date"),
+        "statement_rows_exported": len(statement),
+        "bank_transaction_leg_count": len(statement),
+        "bank_debit_count": len(debit_rows),
+        "descriptions_with_invoice_references": int(
+            reference_results.eq("Unique High-Confidence Reference").sum()
+        ),
+        "ambiguous_invoice_references": int(
+            reference_results.eq("Ambiguous Reference").sum()
+        ),
+        "low_specificity_candidates": int(
+            reference_results.eq("Low-Specificity Candidate").sum()
+        ),
+        "exact_invoice_total_candidates": int(
+            amount_patterns.eq("Exact Invoice Total Candidate").sum()
+        ),
+        "possible_2_percent_tds_candidates": int(
+            amount_patterns.eq("Possible 2% TDS Candidate").sum()
+        ),
+        "possible_10_percent_tds_candidates": int(
+            amount_patterns.eq("Possible 10% TDS Candidate").sum()
+        ),
+        "possible_split_payment_cases": int(
+            debit_rows.loc[
+                amount_patterns.eq(
+                    "Possible Split Payment - Review Required"
+                ),
+                "Matching Bill ID",
+            ]
+            .dropna()
+            .astype(str)
+            .nunique()
+        ),
+        "records_with_no_invoice_reference": int(
+            (~reference_results.eq("Unique High-Confidence Reference")).sum()
+        ),
         "currency_totals": currency_rows,
         "generated_timestamp": datetime.now(timezone.utc).replace(tzinfo=None),
+        "informational_warnings": (
+            [_older_linked_bills_message(older_linked_bill_count)]
+            if older_linked_bill_count
+            else []
+        ),
     }
 
 
@@ -1698,10 +2482,56 @@ def _write_input_summary(
         ("Report start date", summary.get("report_start_date")),
         ("Report end date", summary.get("report_end_date")),
         ("Organizations", ", ".join(summary.get("organizations", [])) or "None"),
-        ("Bill record count", summary["bill_record_count"]),
-        ("Vendor-payment count", summary["vendor_payment_count"]),
+        ("Selected bank source", summary.get("selected_bank_source")),
+        ("Selected source filename", summary.get("selected_source_file")),
+        ("Selected upload ID suffix", summary.get("selected_upload_id_suffix")),
+        (
+            "Statement coverage start date",
+            summary.get("statement_coverage_start_date"),
+        ),
+        (
+            "Statement coverage end date",
+            summary.get("statement_coverage_end_date"),
+        ),
+        ("Statement rows exported", summary["statement_rows_exported"]),
+        ("Outgoing/debit statement rows", summary["bank_debit_count"]),
+        (
+            "High-confidence invoice references",
+            summary["descriptions_with_invoice_references"],
+        ),
+        ("Ambiguous references", summary["ambiguous_invoice_references"]),
+        ("Low-specificity candidates", summary["low_specificity_candidates"]),
+        (
+            "No high-confidence reference",
+            summary["records_with_no_invoice_reference"],
+        ),
+        (
+            "Exact invoice-total candidates",
+            summary["exact_invoice_total_candidates"],
+        ),
+        (
+            "Possible 2% TDS candidates",
+            summary["possible_2_percent_tds_candidates"],
+        ),
+        (
+            "Possible 10% TDS candidates",
+            summary["possible_10_percent_tds_candidates"],
+        ),
+        (
+            "Possible split-payment candidates",
+            summary["possible_split_payment_cases"],
+        ),
+        (
+            "Bills dated within selected period",
+            summary["bills_in_selected_period"],
+        ),
+        (
+            "Older linked bills included",
+            summary["older_linked_bills_included"],
+        ),
+        ("Total bill rows exported", summary["total_bill_rows_exported"]),
+        ("Distinct vendor-payment count", summary["vendor_payment_count"]),
         ("Payment-allocation count", summary["payment_allocation_count"]),
-        ("Bank-transaction-leg count", summary["bank_transaction_leg_count"]),
         ("Generated timestamp", summary["generated_timestamp"]),
     ]
     row = 3
@@ -1716,6 +2546,23 @@ def _write_input_summary(
             worksheet.cell(row, 2).number_format = "#,##0"
         row += 1
 
+    notices = [
+        "Invoice-reference and amount indicators are system-generated review "
+        "helpers. Finance review is required.",
+        *summary.get("informational_warnings", []),
+    ]
+    for warning in notices:
+        worksheet.cell(row, 1, "Information").font = Font(
+            bold=True,
+            color="17365D",
+        )
+        worksheet.merge_cells(start_row=row, start_column=2, end_row=row, end_column=9)
+        message_cell = worksheet.cell(row, 2, warning)
+        message_cell.fill = PatternFill("solid", fgColor="D9EAF7")
+        message_cell.alignment = Alignment(wrap_text=True, vertical="top")
+        worksheet.row_dimensions[row].height = 32
+        row += 1
+
     row += 1
     headers = [
         "Currency",
@@ -1725,8 +2572,8 @@ def _write_input_summary(
         "Vendor-Payment Total",
         "Allocation Count",
         "Allocation Total",
-        "Bank-Leg Count",
-        "Bank Amount Total",
+        "Statement Row Count",
+        "Statement Debit Total",
     ]
     for column, label in enumerate(headers, start=1):
         cell = worksheet.cell(row, column, label)
@@ -1762,22 +2609,31 @@ def create_reconciliation_input_workbook(
     datasets: Mapping[str, pd.DataFrame] | None,
     filters: Mapping[str, Any] | None = None,
     validation_results: Mapping[str, Any] | None = None,
+    bank_upload: Mapping[str, Any] | None = None,
 ) -> Workbook:
     """Create the four-sheet, finance-led reconciliation input workbook."""
     source = datasets or {}
-    validations = dict(
-        validation_results
-        or validate_reconciliation_input_data(source)
-    )
     cleaned = {
         name: _clean_dataframe(source.get(name), columns)
         for name, columns in INPUT_DATASET_COLUMNS.items()
     }
+    cleaned["vendor_bills"] = _select_reconciliation_input_bills(source)
+    cleaned["bank_statement"] = prepare_manual_review_bank_statement(
+        cleaned["vendor_bills"],
+        source.get("bank_statement"),
+    )
+    validation_source = dict(source)
+    validation_source["vendor_bills"] = cleaned["vendor_bills"]
+    validation_source["bank_statement"] = cleaned["bank_statement"]
+    validations = dict(
+        validation_results
+        or validate_reconciliation_input_data(validation_source)
+    )
     payment_batch = combine_zoho_payment_batch(
         cleaned["vendor_payments"],
         cleaned["payment_allocations"],
     )
-    summary = summarize_reconciliation_input(cleaned, filters)
+    summary = summarize_reconciliation_input(cleaned, filters, bank_upload)
 
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -1797,9 +2653,9 @@ def create_reconciliation_input_workbook(
         payment_batch,
     )
     _write_detail_sheet(
-        sheets["Bank Transactions"],
-        "Bank Transactions",
-        cleaned["bank_transactions"],
+        sheets["Bank Statement"],
+        "Bank Statement",
+        cleaned["bank_statement"],
     )
     workbook.calculation.fullCalcOnLoad = True
     workbook.calculation.forceFullCalc = True
@@ -2083,6 +2939,7 @@ def generate_vendor_transactions_report(
     reconciliation_status: str | None = None,
     bank_match_status: str | None = None,
     review_required: bool | None = None,
+    bank_upload_id: str | None = None,
     report_mode: str = REPORT_MODE_INPUT,
     destination_folder: str | Path | None = None,
     project_id: str | None = None,
@@ -2093,6 +2950,9 @@ def generate_vendor_transactions_report(
     if report_mode not in REPORT_MODES:
         raise ValueError(f"Unsupported vendor report mode: {report_mode}")
 
+    generated_at = datetime.now(timezone.utc)
+    timestamp_suffix = generated_at.strftime("%Y%m%dT%H%M%S%fZ")
+
     if report_mode == REPORT_MODE_INPUT:
         datasets, metadata = fetch_reconciliation_input_data(
             start_date=start_date,
@@ -2100,9 +2960,15 @@ def generate_vendor_transactions_report(
             organization=organization,
             vendor=vendor,
             currency=currency,
+            bank_upload_id=bank_upload_id,
             project_id=project_id,
             location=location,
             client=client,
+        )
+        datasets["vendor_bills"] = _select_reconciliation_input_bills(datasets)
+        datasets["bank_statement"] = prepare_manual_review_bank_statement(
+            datasets["vendor_bills"],
+            datasets["bank_statement"],
         )
         validations = validate_reconciliation_input_data(
             datasets,
@@ -2112,10 +2978,11 @@ def generate_vendor_transactions_report(
             datasets,
             filters=metadata["filters"],
             validation_results=validations,
+            bank_upload=metadata["bank_upload"],
         )
         report_name = (
             f"Vendor_Reconciliation_Input_{start_date:%Y%m%d}_"
-            f"{end_date:%Y%m%d}.xlsx"
+            f"{end_date:%Y%m%d}_{timestamp_suffix}.xlsx"
         )
         payment_batch = combine_zoho_payment_batch(
             datasets["vendor_payments"],
@@ -2125,11 +2992,12 @@ def generate_vendor_transactions_report(
             "Summary": workbook["Summary"].max_row,
             "Vendor Bills": len(datasets["vendor_bills"]),
             "Zoho Payment Batch": len(payment_batch),
-            "Bank Transactions": len(datasets["bank_transactions"]),
+            "Bank Statement": len(datasets["bank_statement"]),
         }
         summary = summarize_reconciliation_input(
             datasets,
             metadata["filters"],
+            metadata["bank_upload"],
         )
         message = "Reconciliation Input Data generated successfully."
     else:
@@ -2155,7 +3023,7 @@ def generate_vendor_transactions_report(
         )
         report_name = (
             f"Vendor_Reconciliation_Analysis_{start_date:%Y%m%d}_"
-            f"{end_date:%Y%m%d}.xlsx"
+            f"{end_date:%Y%m%d}_{timestamp_suffix}.xlsx"
         )
         row_counts = {
             sheet_name: (
@@ -2181,9 +3049,16 @@ def generate_vendor_transactions_report(
     report_path = None
     if destination_folder is not None:
         output_folder = Path(destination_folder)
-        output_folder.mkdir(parents=True, exist_ok=True)
-        report_path = output_folder / report_name
-        report_path.write_bytes(report_bytes)
+        try:
+            output_folder.mkdir(parents=True, exist_ok=True)
+            report_path = output_folder / report_name
+            report_path.write_bytes(report_bytes)
+        except OSError as error:
+            raise RuntimeError(
+                "Workbook output could not be written. Close any open copy, "
+                "verify the destination is writable, and try again: "
+                f"{safe_exception_details(error)}"
+            ) from error
 
     return {
         "report_mode": report_mode,
@@ -2201,4 +3076,8 @@ def generate_vendor_transactions_report(
             if name in DATASET_COLUMNS or name in INPUT_DATASET_COLUMNS
         ),
         "message": message,
+        "informational_warnings": validations.get(
+            "informational_warnings",
+            [],
+        ),
     }

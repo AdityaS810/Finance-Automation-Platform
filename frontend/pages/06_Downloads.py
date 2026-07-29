@@ -13,9 +13,12 @@ from backend.reports.vendor_transactions_report import (
     REPORT_MODE_ANALYSIS,
     REPORT_MODE_INPUT,
     REPORT_MODES,
+    fetch_bank_statement_upload_options,
     fetch_vendor_filter_options,
     generate_vendor_transactions_report,
+    recommend_bank_statement_upload,
     safe_exception_details,
+    user_facing_report_error,
 )
 from src.ui import file_summary_card, load_css, page_header, section_card
 from src.utils.cloud_clients import get_bigquery_client
@@ -175,6 +178,32 @@ def _vendor_filter_options() -> dict[str, list[str]]:
     return fetch_vendor_filter_options(client=get_bigquery_client())
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _bank_statement_upload_options(
+    start_date: date,
+    end_date: date,
+) -> list[dict]:
+    """Cache safe statement-upload coverage choices."""
+    return fetch_bank_statement_upload_options(
+        start_date,
+        end_date,
+        client=get_bigquery_client(),
+    )
+
+
+def _bank_upload_label(upload: dict) -> str:
+    coverage = (
+        f"{upload.get('coverage_start_date') or '?'} to "
+        f"{upload.get('coverage_end_date') or '?'}"
+    )
+    return (
+        f"{upload.get('source_file') or 'Uploaded statement'} | "
+        f"{upload.get('bank_source') or 'Bank'} | {coverage} | "
+        f"{int(upload.get('row_count') or 0):,} rows | "
+        f"ID …{str(upload.get('upload_id') or '')[-4:]}"
+    )
+
+
 section_card(
     "Vendor Downloads",
     body_html=(
@@ -192,7 +221,7 @@ selected_report_mode = st.selectbox(
 if selected_report_mode == REPORT_MODE_INPUT:
     st.caption(
         "Download structured Zoho bills, vendor-payment batches, bill allocations, "
-        "and bank transactions for manual reconciliation."
+        "and one explicitly selected uploaded bank statement for manual reconciliation."
     )
 else:
     st.caption(
@@ -253,6 +282,55 @@ with filter_row_two[2]:
         key="vendor_report_currency",
     )
 
+selected_bank_upload_id = None
+if selected_report_mode == REPORT_MODE_INPUT:
+    try:
+        bank_uploads = _bank_statement_upload_options(
+            vendor_start_date,
+            vendor_end_date,
+        )
+        recommended_upload_id = recommend_bank_statement_upload(
+            bank_uploads,
+            vendor_start_date,
+            vendor_end_date,
+        )
+        uploads_by_id = {
+            str(upload["upload_id"]): upload
+            for upload in bank_uploads
+        }
+        upload_ids = list(uploads_by_id)
+        default_index = (
+            upload_ids.index(recommended_upload_id) + 1
+            if recommended_upload_id in upload_ids
+            else 0
+        )
+        selected_bank_upload_id = st.selectbox(
+            "Bank statement upload",
+            options=[None, *upload_ids],
+            index=default_index,
+            format_func=lambda value: (
+                "Select an uploaded bank statement"
+                if value is None
+                else _bank_upload_label(uploads_by_id[value])
+            ),
+            key="vendor_report_bank_upload_id",
+        )
+        if recommended_upload_id is None:
+            st.warning(
+                "No single uploaded statement covers the complete selected period. "
+                "Choose the intended upload explicitly; uploads will not be merged."
+            )
+        elif selected_bank_upload_id == recommended_upload_id:
+            st.caption(
+                "Recommended because this upload covers the complete report period."
+            )
+    except Exception as error:
+        bank_uploads = []
+        st.warning(
+            "Bank statement uploads are temporarily unavailable: "
+            f"{safe_exception_details(error)}"
+        )
+
 selected_reconciliation_status = None
 selected_bank_match_status = None
 selected_review_required = None
@@ -306,6 +384,12 @@ if st.button(
         st.session_state["vendor_report_error"] = "Start date must be on or before end date."
         st.session_state.pop("vendor_report_result", None)
         st.session_state.pop("vendor_report_error_details", None)
+    elif selected_report_mode == REPORT_MODE_INPUT and not selected_bank_upload_id:
+        st.session_state["vendor_report_error"] = (
+            "Select one uploaded bank statement before generating the workbook."
+        )
+        st.session_state.pop("vendor_report_result", None)
+        st.session_state.pop("vendor_report_error_details", None)
     else:
         try:
             with st.spinner("Generating vendor workbook from BigQuery..."):
@@ -318,6 +402,7 @@ if st.button(
                     reconciliation_status=selected_reconciliation_status,
                     bank_match_status=selected_bank_match_status,
                     review_required=selected_review_required,
+                    bank_upload_id=selected_bank_upload_id,
                     report_mode=selected_report_mode,
                     client=get_bigquery_client(),
                 )
@@ -325,7 +410,7 @@ if st.button(
             st.session_state.pop("vendor_report_error", None)
             st.session_state.pop("vendor_report_error_details", None)
         except Exception as error:
-            st.session_state["vendor_report_error"] = "The vendor report could not be generated. Please try again."
+            st.session_state["vendor_report_error"] = user_facing_report_error(error)
             st.session_state["vendor_report_error_details"] = safe_exception_details(error)
             st.session_state.pop("vendor_report_result", None)
 
@@ -371,9 +456,44 @@ elif vendor_report_result:
         f"{allocation_count:,}",
     )
     count_columns[3].metric(
-        "Bank Transaction Legs",
+        "Bank Statement Rows" if is_input_mode else "Bank Transaction Legs",
         f"{bank_leg_count:,}",
     )
+    if is_input_mode:
+        review_columns = st.columns(4)
+        review_columns[0].metric(
+            "Bank Debits",
+            f"{summary['bank_debit_count']:,}",
+        )
+        review_columns[1].metric(
+            "Invoice References",
+            f"{summary['descriptions_with_invoice_references']:,}",
+        )
+        review_columns[2].metric(
+            "Exact Invoice Totals",
+            f"{summary['exact_invoice_total_candidates']:,}",
+        )
+        review_columns[3].metric(
+            "No Invoice Reference",
+            f"{summary['records_with_no_invoice_reference']:,}",
+        )
+        suggestion_columns = st.columns(3)
+        suggestion_columns[0].metric(
+            "Possible 2% TDS",
+            f"{summary['possible_2_percent_tds_candidates']:,}",
+        )
+        suggestion_columns[1].metric(
+            "Possible 10% TDS",
+            f"{summary['possible_10_percent_tds_candidates']:,}",
+        )
+        suggestion_columns[2].metric(
+            "Possible Split Payments",
+            f"{summary['possible_split_payment_cases']:,}",
+        )
+        st.caption(
+            f"Ambiguous references: {summary['ambiguous_invoice_references']:,} · "
+            f"Low-specificity candidates: {summary['low_specificity_candidates']:,}"
+        )
     if not is_input_mode:
         reconciliation_counts = summary["reconciliation_counts"]
         count_columns[4].metric(
@@ -396,6 +516,8 @@ elif vendor_report_result:
             "contains the required sheets and headers."
         )
     else:
+        for warning in vendor_report_result.get("informational_warnings", []):
+            st.warning(warning)
         st.success(vendor_report_result["message"])
 
     report_name = vendor_report_result["report_name"]
