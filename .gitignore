@@ -7,6 +7,8 @@ service-account-key.json
 cloud_function/env.yaml
 frontend/.env
 frontend/.pytest_cache/
+/.pytest_cache/
+/pytest_temp*/
 frontend/**/__pycache__/
 frontend/outputs/
 frontend/tests/_tmp/
